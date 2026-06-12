@@ -1,0 +1,1749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EO Data Explorer — Ecosynthra Lab</title>
+
+<!-- Leaflet -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<!-- Leaflet Draw -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+<style>
+  :root {
+    --bg:       #0b1117;
+    --panel:    #131b24;
+    --border:   #1e2e3e;
+    --accent:   #00d4a1;      /* teal-green — echoes NDVI health */
+    --accent2:  #f59e0b;      /* amber — spectral energy */
+    --text:     #d4e4f0;
+    --muted:    #6b8fa8;
+    --danger:   #ef4444;
+    --success:  #22c55e;
+    --font-mono: 'JetBrains Mono', 'Fira Mono', monospace;
+    --font-ui:   'Inter', 'Segoe UI', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: var(--font-ui); background: var(--bg); color: var(--text); overflow: hidden; }
+
+  /* ── LAYOUT ── */
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 18px; background: var(--panel);
+    border-bottom: 1px solid var(--border); flex-shrink: 0; z-index: 1000;
+  }
+  .logo { font-size: 11px; font-family: var(--font-mono); color: var(--accent); letter-spacing: 0.15em; text-transform: uppercase; }
+  .logo span { color: var(--muted); }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+  .badge { font-size: 10px; font-family: var(--font-mono); background: rgba(0,212,161,0.12); color: var(--accent); border: 1px solid rgba(0,212,161,0.3); border-radius: 4px; padding: 2px 7px; }
+
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── SIDEBAR ── */
+  #sidebar {
+    width: 300px; flex-shrink: 0; background: var(--panel);
+    border-right: 1px solid var(--border); display: flex; flex-direction: column;
+    overflow: hidden; z-index: 500;
+  }
+  /* Controls block: scrollable, shrinks when results appear */
+  #controls-block {
+    flex-shrink: 0; overflow-y: auto;
+    /* default: takes natural height; capped so results always have room */
+    max-height: 100%;
+    transition: max-height 0.3s ease;
+  }
+  /* When results are showing, compress controls to leave room */
+  #sidebar.has-results #controls-block {
+    max-height: 44%;
+  }
+  /* Results block: hidden until search runs, then takes remaining space */
+  #results-block {
+    display: none; flex-direction: column; overflow: hidden;
+    border-top: 2px solid var(--accent); min-height: 0;
+    flex: 1;
+  }
+  #sidebar.has-results #results-block {
+    display: flex;
+  }
+  /* On mobile (display:block sidebar), results-block needs explicit rendering */
+  @media (max-width: 700px) {
+    #results-block { height: auto; }
+    #results-panel { height: 220px; overflow-y: auto; flex: none; }
+  }
+  #results-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 16px; flex-shrink: 0; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  #results-header .r-title {
+    font-size: 10px; font-family: var(--font-mono); letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  #results-header .r-count {
+    font-size: 10px; font-family: var(--font-mono); color: var(--accent);
+  }
+
+  .section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .section-title {
+    font-size: 10px; font-family: var(--font-mono); letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .section-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+  select, input[type=text], input[type=date] {
+    width: 100%; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); font-family: var(--font-ui); font-size: 12px;
+    padding: 7px 10px; border-radius: 5px; outline: none; appearance: none;
+  }
+  select:focus, input:focus { border-color: var(--accent); }
+  .field { margin-bottom: 10px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  /* Sensor cards */
+  .sensor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .sensor-card {
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+    cursor: pointer; transition: all 0.15s; background: var(--bg);
+  }
+  .sensor-card:hover { border-color: var(--accent); }
+  .sensor-card.active { border-color: var(--accent); background: rgba(0,212,161,0.08); }
+  .sensor-card .s-name { font-size: 11px; font-weight: 600; color: var(--text); }
+  .sensor-card .s-res  { font-size: 10px; color: var(--muted); font-family: var(--font-mono); margin-top: 1px; }
+  .sensor-card .s-tag  { font-size: 9px; margin-top: 4px; color: var(--accent); font-family: var(--font-mono); }
+
+  /* Band checkboxes */
+  .band-list { display: flex; flex-wrap: wrap; gap: 5px; }
+  .band-pill {
+    font-size: 10px; font-family: var(--font-mono); padding: 3px 8px;
+    border: 1px solid var(--border); border-radius: 3px; cursor: pointer;
+    background: var(--bg); transition: all 0.12s; user-select: none;
+  }
+  .band-pill:hover { border-color: var(--accent); }
+  .band-pill.on { background: rgba(0,212,161,0.15); border-color: var(--accent); color: var(--accent); }
+
+  /* Cloud slider */
+  .slider-wrap { display: flex; align-items: center; gap: 8px; }
+  input[type=range] {
+    flex: 1; accent-color: var(--accent); background: transparent;
+    height: 3px; cursor: pointer;
+  }
+  .slider-val { font-family: var(--font-mono); font-size: 11px; color: var(--accent); width: 36px; text-align: right; }
+
+  /* AOI info */
+  #aoi-info { font-family: var(--font-mono); font-size: 11px; color: var(--muted); padding: 4px 0; }
+  #aoi-info span { color: var(--accent); }
+
+  /* Buttons */
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 9px 14px; border-radius: 6px; font-size: 12px; font-weight: 600;
+    cursor: pointer; border: none; transition: all 0.15s; width: 100%;
+    letter-spacing: 0.01em;
+  }
+  .btn-primary { background: var(--accent); color: #0b1117; }
+  .btn-primary:hover { background: #00f0b8; }
+  .btn-primary:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+  .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-gap { display: flex; flex-direction: column; gap: 7px; }
+
+  /* Results panel */
+  #results-panel {
+    flex: 1; padding: 10px 12px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 7px; min-height: 0;
+  }
+  .scene-card {
+    border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+    background: var(--bg); transition: border-color 0.15s;
+  }
+  .scene-card:hover { border-color: var(--accent); }
+  .scene-header {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center; gap: 10px;
+    padding: 10px 12px; cursor: pointer;
+  }
+  .scene-info { min-width: 0; }
+  .scene-date {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 700;
+    color: var(--text); white-space: nowrap;
+  }
+  .scene-sensor {
+    font-size: 10.5px; color: var(--muted); margin-top: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cloud-badge {
+    font-size: 11px; font-family: var(--font-mono); font-weight: 700;
+    padding: 4px 8px; border-radius: 4px; white-space: nowrap;
+    border: 1px solid currentColor;
+  }
+  .cloud-low  { background: rgba(34,197,94,0.12); color: var(--success); }
+  .cloud-mid  { background: rgba(245,158,11,0.12); color: var(--accent2); }
+  .cloud-high { background: rgba(239,68,68,0.12); color: var(--danger); }
+  .scene-body { padding: 0 12px 12px; display: none; }
+  .scene-body.open { display: block; }
+  .meta-row { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); padding: 2px 0; }
+  .meta-row span:last-child { color: var(--text); font-family: var(--font-mono); }
+
+  .dl-row { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .dl-btn {
+    font-size: 10px; font-family: var(--font-mono); padding: 5px 10px;
+    border-radius: 4px; cursor: pointer; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); transition: all 0.12s;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .dl-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .dl-btn.primary { background: rgba(0,212,161,0.1); border-color: var(--accent); color: var(--accent); }
+
+  /* Always-visible download button on each scene card */
+  .dl-card-btn {
+    font-size: 11px; font-weight: 700; font-family: var(--font-ui);
+    padding: 6px 12px; border-radius: 5px; border: 1px solid var(--accent);
+    background: var(--accent); color: #0b1117;
+    cursor: pointer; transition: all 0.15s; white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .dl-card-btn:hover { background: #00f0b8; }
+
+  /* Map */
+  #map { flex: 1; }
+
+  /* Status bar */
+  #status {
+    position: absolute; bottom: 10px; left: 318px; z-index: 800;
+    background: rgba(11,17,23,0.9); border: 1px solid var(--border);
+    border-radius: 5px; padding: 5px 12px; font-family: var(--font-mono);
+    font-size: 11px; color: var(--muted); backdrop-filter: blur(4px);
+    pointer-events: none;
+  }
+  #coords { color: var(--accent); }
+
+  /* Toast */
+  #toast {
+    position: fixed; bottom: 30px; right: 30px; z-index: 9999;
+    background: var(--panel); border: 1px solid var(--accent);
+    color: var(--text); padding: 10px 18px; border-radius: 7px;
+    font-size: 13px; opacity: 0; transition: opacity 0.3s;
+    pointer-events: none; max-width: 280px;
+  }
+  #toast.show { opacity: 1; }
+
+  /* Spinner */
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Empty state */
+  #empty-state { text-align: center; padding: 30px 16px; color: var(--muted); }
+  #empty-state .icon { font-size: 28px; margin-bottom: 8px; }
+  #empty-state p { font-size: 12px; line-height: 1.6; }
+
+  /* Leaflet overrides */
+  .leaflet-container { background: #0a0f15; }
+  .leaflet-control-zoom a { background: var(--panel) !important; color: var(--text) !important; border-color: var(--border) !important; }
+  .leaflet-bar { border: 1px solid var(--border) !important; }
+  .leaflet-draw-toolbar a { background-color: var(--panel) !important; color: var(--text) !important; }
+  .leaflet-touch .leaflet-bar a { line-height: 26px; }
+
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ── AWS S3 MODAL ── */
+  #s3-modal-overlay {
+    display: none; position: fixed; inset: 0; z-index: 9000;
+    background: rgba(0,0,0,0.75); backdrop-filter: blur(3px);
+    align-items: center; justify-content: center;
+  }
+  #s3-modal-overlay.open { display: flex; }
+  #s3-modal {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; width: min(560px, 95vw); max-height: 85vh;
+    overflow-y: auto; padding: 20px 22px;
+  }
+  #s3-modal h2 { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  #s3-modal .sub { font-size: 11px; color: var(--muted); margin-bottom: 16px; }
+  .s3-group { margin-bottom: 14px; }
+  .s3-group-title { font-size: 10px; font-family: var(--font-mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .s3-link-row {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 5px; padding: 7px 10px; margin-bottom: 5px;
+  }
+  .s3-link-row .s3-icon { font-size: 14px; flex-shrink: 0; }
+  .s3-link-row .s3-path {
+    font-family: var(--font-mono); font-size: 10px; color: var(--text);
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .s3-link-row .s3-size { font-family: var(--font-mono); font-size: 10px; color: var(--muted); flex-shrink: 0; }
+  .s3-copy-btn {
+    font-size: 10px; padding: 3px 8px; border-radius: 3px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--panel); color: var(--muted);
+    transition: all 0.12s; flex-shrink: 0;
+  }
+  .s3-copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .s3-open-btn {
+    font-size: 10px; padding: 3px 8px; border-radius: 3px; cursor: pointer;
+    border: 1px solid var(--accent); background: rgba(0,212,161,0.1); color: var(--accent);
+    transition: all 0.12s; flex-shrink: 0; text-decoration: none;
+  }
+  .s3-open-btn:hover { background: rgba(0,212,161,0.2); }
+  .aws-note {
+    font-size: 11px; color: var(--muted); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 8px 12px; margin-bottom: 14px; line-height: 1.6;
+  }
+  .aws-note strong { color: var(--accent2); }
+  .modal-footer { display: flex; gap: 8px; margin-top: 16px; }
+  .s3-dl-all {
+    flex: 1; padding: 9px; border-radius: 6px; font-size: 12px; font-weight: 600;
+    cursor: pointer; border: none; background: var(--accent); color: #0b1117;
+    transition: background 0.15s;
+  }
+  .s3-dl-all:hover { background: #00f0b8; }
+  .s3-close {
+    padding: 9px 16px; border-radius: 6px; font-size: 12px;
+    cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text);
+  }
+  .s3-close:hover { border-color: var(--danger); color: var(--danger); }
+  .tab-row { display: flex; gap: 4px; margin-bottom: 14px; }
+  .tab-btn {
+    font-size: 11px; padding: 5px 12px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+    transition: all 0.12s; font-family: var(--font-mono);
+  }
+  .tab-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(0,212,161,0.08); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .wget-box {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+    padding: 10px 12px; font-family: var(--font-mono); font-size: 10px;
+    color: var(--text); white-space: pre-wrap; word-break: break-all;
+    line-height: 1.7; max-height: 200px; overflow-y: auto;
+  }
+  .wget-box .cmd-kw { color: var(--accent2); }
+  .wget-box .cmd-url { color: var(--accent); }
+
+  @media (max-width: 700px) {
+    /* Map shrinks to top 38% */
+    .main { flex-direction: column; height: 100%; overflow: hidden; }
+    #map { height: 38vh; flex-shrink: 0; }
+
+    /* Sidebar becomes a bottom sheet, takes remaining space, scrolls */
+    #sidebar {
+      width: 100% !important;
+      flex: 1;
+      border-right: none;
+      border-top: 2px solid var(--accent);
+      overflow-y: auto !important;
+      /* Un-do the flex column that hides results */
+      display: block !important;
+      overflow-x: hidden;
+    }
+
+    /* Controls: natural height, no max-height cap on mobile */
+    #controls-block { max-height: none !important; overflow-y: visible; }
+
+    /* Results: always visible, fixed min-height so cards show */
+    #results-block {
+      display: flex !important;
+      min-height: 220px;
+    }
+
+    /* Results panel: enough height for ~3 cards */
+    #results-panel { min-height: 180px; overflow-y: visible; }
+
+    /* Scene cards: make sure text is visible */
+    .scene-card { flex-shrink: 0; }
+
+    #status { display: none; }
+  }
+
+  /* Very narrow screens: stack date/sensor on row 1, badge+button on row 2 */
+  @media (max-width: 380px) {
+    .scene-header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      grid-template-rows: auto auto;
+      row-gap: 8px;
+    }
+    .scene-info { grid-column: 1 / -1; }
+    .cloud-badge { justify-self: start; }
+    .dl-card-btn { justify-self: end; }
+  }
+
+  /* ── HEADER BUTTONS ── */
+  .hdr-btn {
+    font-size: 11px; font-family: var(--font-mono); padding: 5px 12px;
+    border-radius: 5px; cursor: pointer; border: 1px solid var(--border);
+    background: var(--bg); color: var(--muted); transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .hdr-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .gee-btn { border-color: rgba(245,158,11,0.4); color: var(--accent2); }
+  .gee-btn:hover { border-color: var(--accent2); background: rgba(245,158,11,0.08); }
+
+  /* ── RIGHT SLIDE-IN PANELS ── */
+  .rpanel {
+    position: absolute; top: 0; right: 0; bottom: 0; z-index: 900;
+    width: min(420px, 98vw); background: var(--panel);
+    border-left: 1px solid var(--border);
+    transform: translateX(100%); transition: transform 0.28s cubic-bezier(.4,0,.2,1);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .rpanel.open { transform: translateX(0); }
+  .rpanel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 13px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .rpanel-head h2 { font-size: 14px; font-weight: 700; }
+  .rpanel-close {
+    width: 28px; height: 28px; border-radius: 5px; border: 1px solid var(--border);
+    background: transparent; color: var(--muted); cursor: pointer; font-size: 16px;
+    display: flex; align-items: center; justify-content: center; transition: all 0.12s;
+  }
+  .rpanel-close:hover { border-color: var(--danger); color: var(--danger); }
+  .rpanel-body { flex: 1; overflow-y: auto; padding: 14px 16px; }
+
+  /* ── TEACHING LAYER ── */
+  .teach-intro {
+    font-size: 12px; color: var(--muted); line-height: 1.6; margin-bottom: 14px;
+    padding: 10px 12px; background: var(--bg); border-radius: 6px;
+    border-left: 3px solid var(--accent);
+  }
+  .combo-grid { display: flex; flex-direction: column; gap: 8px; }
+  .combo-card {
+    border: 1px solid var(--border); border-radius: 7px; overflow: hidden;
+    cursor: pointer; transition: border-color 0.15s; background: var(--bg);
+  }
+  .combo-card:hover { border-color: var(--accent); }
+  .combo-card.active { border-color: var(--accent); }
+  .combo-head {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  }
+  .combo-swatch {
+    width: 36px; height: 36px; border-radius: 5px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  .combo-title { font-size: 12px; font-weight: 600; }
+  .combo-tags { display: flex; gap: 4px; margin-top: 2px; flex-wrap: wrap; }
+  .combo-tag {
+    font-size: 9px; font-family: var(--font-mono); padding: 1px 5px;
+    border-radius: 2px; border: 1px solid var(--border); color: var(--muted);
+  }
+  .combo-body { display: none; padding: 0 12px 12px; }
+  .combo-body.open { display: block; }
+  .combo-desc { font-size: 12px; color: var(--muted); line-height: 1.6; margin-bottom: 8px; }
+  .combo-formula {
+    font-family: var(--font-mono); font-size: 11px; padding: 8px 10px;
+    background: rgba(0,0,0,0.3); border-radius: 4px; color: var(--accent);
+    margin-bottom: 8px; white-space: pre-wrap;
+  }
+  .combo-use { font-size: 11px; color: var(--accent2); font-style: italic; }
+  .combo-apply-btn {
+    margin-top: 10px; font-size: 11px; font-family: var(--font-mono);
+    padding: 5px 12px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--accent); background: rgba(0,212,161,0.1); color: var(--accent);
+    transition: all 0.12s;
+  }
+  .combo-apply-btn:hover { background: var(--accent); color: #0b1117; }
+
+  /* ── GEE PANEL ── */
+  .gee-intro {
+    font-size: 12px; color: var(--muted); line-height: 1.6; margin-bottom: 14px;
+    padding: 10px 12px; background: var(--bg); border-radius: 6px;
+    border-left: 3px solid var(--accent2);
+  }
+  .gee-section { margin-bottom: 14px; }
+  .gee-section-title {
+    font-size: 10px; font-family: var(--font-mono); color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px;
+  }
+  .gee-select-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .gee-pill {
+    font-size: 10px; font-family: var(--font-mono); padding: 4px 10px;
+    border-radius: 3px; cursor: pointer; border: 1px solid var(--border);
+    background: var(--bg); color: var(--muted); transition: all 0.12s; user-select: none;
+  }
+  .gee-pill.on { border-color: var(--accent2); color: var(--accent2); background: rgba(245,158,11,0.1); }
+  .gee-code {
+    background: #050a0f; border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px 14px; font-family: var(--font-mono); font-size: 10.5px;
+    color: #c9d1d9; line-height: 1.75; max-height: 360px; overflow-y: auto;
+    white-space: pre; tab-size: 2;
+  }
+  .gee-code .kw  { color: #ff7b72; }
+  .gee-code .str { color: #a5d6ff; }
+  .gee-code .num { color: #79c0ff; }
+  .gee-code .cmt { color: #8b949e; font-style: italic; }
+  .gee-code .fn  { color: #d2a8ff; }
+  .gee-code .var { color: #ffa657; }
+  .gee-code .aoi { color: var(--accent); }
+  .gee-btn-row { display: flex; gap: 8px; margin-top: 10px; }
+  .gee-copy {
+    flex: 1; padding: 9px; border-radius: 6px; font-size: 12px; font-weight: 600;
+    cursor: pointer; border: none; background: var(--accent2); color: #0b1117;
+    transition: background 0.15s;
+  }
+  .gee-copy:hover { background: #fbbf24; }
+  .gee-open {
+    flex: 1; padding: 9px; border-radius: 6px; font-size: 12px; font-weight: 600;
+    cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text);
+    transition: all 0.15s; text-decoration: none; display: flex; align-items: center; justify-content: center;
+  }
+  .gee-open:hover { border-color: var(--accent2); color: var(--accent2); }
+  @media (max-width: 700px) {
+    .rpanel { width: 100%; bottom: 0; top: auto; height: 80vh; border-left: none; border-top: 1px solid var(--border); transform: translateY(100%); }
+    .rpanel.open { transform: translateY(0); }
+    .hdr-btn { font-size: 10px; padding: 4px 8px; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── HEADER ── -->
+  <header>
+    <div class="logo">Ecosynthra<span>Lab</span></div>
+    <h1>EO Data Explorer</h1>
+    <div class="badge">STUDENT EDITION</div>
+    <div style="margin-left:auto;display:flex;gap:8px;">
+      <button class="hdr-btn" onclick="openPanel('teach')" title="Band combination guide">
+        &#127891; Teaching Layer
+      </button>
+      <button class="hdr-btn gee-btn" onclick="openPanel('gee')" title="Generate GEE script">
+        &#128196; GEE Script
+      </button>
+    </div>
+  </header>
+
+  <div class="main">
+
+    <!-- ── SIDEBAR ── -->
+    <div id="sidebar">
+
+      <!-- TOP: all controls, scrollable -->
+      <div id="controls-block">
+
+        <!-- SENSOR -->
+        <div class="section">
+          <div class="section-title">Sensor</div>
+          <div class="sensor-grid" id="sensor-grid">
+            <div class="sensor-card active" data-sensor="S2" onclick="selectSensor(this)">
+              <div class="s-name">Sentinel-2</div>
+              <div class="s-res">10 – 60 m</div>
+              <div class="s-tag">MSI · Optical</div>
+            </div>
+            <div class="sensor-card" data-sensor="S1" onclick="selectSensor(this)">
+              <div class="s-name">Sentinel-1</div>
+              <div class="s-res">5 – 20 m</div>
+              <div class="s-tag">SAR · C-band</div>
+            </div>
+            <div class="sensor-card" data-sensor="L8" onclick="selectSensor(this)">
+              <div class="s-name">Landsat 8/9</div>
+              <div class="s-res">30 m</div>
+              <div class="s-tag">OLI · Optical</div>
+            </div>
+            <div class="sensor-card" data-sensor="SRTM" onclick="selectSensor(this)">
+              <div class="s-name">SRTM DEM</div>
+              <div class="s-res">30 m</div>
+              <div class="s-tag">Elevation</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DATE RANGE -->
+        <div class="section" id="date-section">
+          <div class="section-title">Date Range</div>
+          <div class="row2">
+            <div class="field">
+              <label>Start</label>
+              <input type="date" id="date-start" value="2024-01-01">
+            </div>
+            <div class="field">
+              <label>End</label>
+              <input type="date" id="date-end" value="2024-12-31">
+            </div>
+          </div>
+          <div class="field">
+            <label>Cloud cover ≤ <span id="cloud-label">30%</span></label>
+            <div class="slider-wrap">
+              <input type="range" id="cloud-slider" min="0" max="100" value="30" oninput="updateCloud(this)">
+              <div class="slider-val" id="cloud-val">30%</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- BANDS -->
+        <div class="section" id="bands-section">
+          <div class="section-title">Bands / Layers</div>
+          <div class="band-list" id="band-list"></div>
+        </div>
+
+        <!-- AOI -->
+        <div class="section">
+          <div class="section-title">Area of Interest</div>
+          <div id="aoi-info">No AOI drawn — use the ✏ tool on the map</div>
+          <div style="margin-top:8px; display:flex; gap:6px;">
+            <button class="btn btn-outline" style="font-size:11px; padding:6px 10px;" onclick="clearAOI()">✕ Clear</button>
+            <button class="btn btn-outline" style="font-size:11px; padding:6px 10px;" onclick="zoomSENigeria()">📍 SE Nigeria</button>
+          </div>
+        </div>
+
+        <!-- SEARCH -->
+        <div class="section">
+          <div class="btn-gap">
+            <button class="btn btn-primary" id="search-btn" onclick="searchScenes()">
+              <span>🔍</span> Search Scenes
+            </button>
+          </div>
+        </div>
+
+      </div><!-- /controls-block -->
+
+      <!-- BOTTOM: results, always visible, scrollable -->
+      <div id="results-block">
+        <div id="results-header">
+          <span class="r-title">Results</span>
+          <span class="r-count" id="results-count">—</span>
+        </div>
+        <div id="results-panel">
+          <div id="empty-state">
+            <div class="icon">🛰</div>
+            <p>Draw an AOI, choose a sensor and date range, then click <strong>Search Scenes</strong>.</p>
+          </div>
+        </div>
+      </div><!-- /results-block -->
+
+    </div>
+
+    <!-- ── MAP ── -->
+    <div id="map"></div>
+  </div>
+
+</div>
+
+
+<!-- ── TEACHING LAYER PANEL ── -->
+<div class="rpanel" id="panel-teach">
+  <div class="rpanel-head">
+    <h2>&#127891; Band Combination Guide</h2>
+    <button class="rpanel-close" onclick="closePanel('teach')">&#10005;</button>
+  </div>
+  <div class="rpanel-body">
+    <div class="teach-intro">
+      Click any combination to see which bands to use, what it reveals, and its spectral formula.
+      Hit <strong>Apply</strong> to auto-select those bands in the main panel.
+    </div>
+    <div class="combo-grid" id="combo-grid"></div>
+  </div>
+</div>
+
+<!-- ── GEE SCRIPT PANEL ── -->
+<div class="rpanel" id="panel-gee">
+  <div class="rpanel-head">
+    <h2>&#128196; GEE Script Generator</h2>
+    <button class="rpanel-close" onclick="closePanel('gee')">&#10005;</button>
+  </div>
+  <div class="rpanel-body">
+    <div class="gee-intro">
+      Generates a ready-to-run Google Earth Engine script using your current AOI, sensor, date range, and selected bands. Paste into <strong>code.earthengine.google.com</strong>.
+    </div>
+
+    <div class="gee-section">
+      <div class="gee-section-title">Output type</div>
+      <div class="gee-select-row">
+        <div class="gee-pill on" data-out="visualize" onclick="setGeeOut(this)">Visualize</div>
+        <div class="gee-pill" data-out="export_drive" onclick="setGeeOut(this)">Export to Drive</div>
+        <div class="gee-pill" data-out="export_asset" onclick="setGeeOut(this)">Export to Asset</div>
+        <div class="gee-pill" data-out="timeseries" onclick="setGeeOut(this)">Time Series Chart</div>
+      </div>
+    </div>
+
+    <div class="gee-section">
+      <div class="gee-section-title">Extra indices</div>
+      <div class="gee-select-row">
+        <div class="gee-pill" data-idx="NDVI" onclick="toggleGeeIdx(this)">NDVI</div>
+        <div class="gee-pill" data-idx="EVI" onclick="toggleGeeIdx(this)">EVI</div>
+        <div class="gee-pill" data-idx="NDWI" onclick="toggleGeeIdx(this)">NDWI</div>
+        <div class="gee-pill" data-idx="NBR" onclick="toggleGeeIdx(this)">NBR</div>
+        <div class="gee-pill" data-idx="SAVI" onclick="toggleGeeIdx(this)">SAVI</div>
+        <div class="gee-pill" data-idx="CRI" onclick="toggleGeeIdx(this)">CRI (invasive)</div>
+      </div>
+    </div>
+
+    <div class="gee-section">
+      <div class="gee-section-title">Generated script</div>
+      <div class="gee-code" id="gee-code-block">// Click &quot;Generate&quot; to build your script</div>
+      <div class="gee-btn-row">
+        <button class="gee-copy" onclick="generateGEE()">&#9654; Generate</button>
+        <button class="gee-copy" style="background:var(--accent);" onclick="copyGEE()">&#128203; Copy</button>
+        <a class="gee-open" href="https://code.earthengine.google.com" target="_blank" rel="noopener">Open GEE &#8599;</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Panel backdrop -->
+<div id="panel-backdrop" onclick="closeAllPanels()"
+  style="display:none;position:fixed;inset:0;z-index:899;background:rgba(0,0,0,0.4);backdrop-filter:blur(2px);"></div>
+
+<!-- Status bar -->
+<div id="status">Cursor: <span id="coords">—</span></div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<!-- ── AWS S3 DOWNLOAD MODAL ── -->
+<div id="s3-modal-overlay" onclick="closeS3Modal(event)">
+  <div id="s3-modal">
+    <h2 id="modal-title">↓ Download Scene</h2>
+    <div class="sub" id="modal-sub"></div>
+
+    <div class="aws-note">
+      <strong>Free & open:</strong> Sentinel-2 and Landsat are hosted on AWS Open Data with no egress charges when accessed from any region. Use the links below in your browser, <code>wget</code>, <code>aws s3 cp</code>, or QGIS/GDAL directly.
+    </div>
+
+    <div class="tab-row">
+      <button class="tab-btn active" onclick="switchTab('files',this)">📁 Files</button>
+      <button class="tab-btn" onclick="switchTab('wget',this)">💻 wget</button>
+      <button class="tab-btn" onclick="switchTab('gdal',this)">🗺 GDAL / QGIS</button>
+    </div>
+
+    <div class="tab-panel active" id="tab-files">
+      <div id="s3-file-list"></div>
+    </div>
+
+    <div class="tab-panel" id="tab-wget">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Paste into your terminal. Downloads selected bands to current directory.</div>
+      <div class="wget-box" id="wget-box"></div>
+      <button class="s3-copy-btn" style="margin-top:8px;padding:5px 12px;" onclick="copyWget()">Copy script</button>
+    </div>
+
+    <div class="tab-panel" id="tab-gdal">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">Open directly in QGIS (Add Raster Layer → choose URL) or use GDAL with <code>/vsicurl/</code>.</div>
+      <div class="wget-box" id="gdal-box"></div>
+      <button class="s3-copy-btn" style="margin-top:8px;padding:5px 12px;" onclick="copyGdal()">Copy GDAL commands</button>
+    </div>
+
+    <div class="modal-footer">
+      <button class="s3-dl-all" onclick="downloadManifest()">⬇ Download manifest.txt</button>
+      <button class="s3-close" onclick="closeS3Modal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── MAP SETUP ────────────────────────────────────────────────────────────────
+const map = L.map('map', {
+  center: [6.2, 7.0],
+  zoom: 7,
+  zoomControl: true
+});
+
+// Base layers
+const cartoDark = L.tileLayer(
+  'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+  { attribution: '© OpenStreetMap © CARTO', subdomains: 'abcd', maxZoom: 19 }
+).addTo(map);
+
+const esriSat = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  { attribution: 'Tiles © Esri', maxZoom: 19 }
+);
+
+const osm = L.tileLayer(
+  'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  { attribution: '© OpenStreetMap', maxZoom: 19 }
+);
+
+L.control.layers({
+  'Dark (default)': cartoDark,
+  'Satellite (Esri)': esriSat,
+  'OpenStreetMap': osm
+}, {}, { position: 'topright' }).addTo(map);
+
+// Coordinate display
+map.on('mousemove', e => {
+  document.getElementById('coords').textContent =
+    `${e.latlng.lat.toFixed(4)}°N, ${e.latlng.lng.toFixed(4)}°E`;
+});
+
+// ── DRAW CONTROLS ────────────────────────────────────────────────────────────
+const drawnItems = new L.FeatureGroup().addTo(map);
+const drawControl = new L.Control.Draw({
+  draw: {
+    polygon:   { shapeOptions: { color: '#00d4a1', weight: 2, fillOpacity: 0.1 } },
+    rectangle: { shapeOptions: { color: '#00d4a1', weight: 2, fillOpacity: 0.1 } },
+    circle: false, marker: false, polyline: false, circlemarker: false
+  },
+  edit: { featureGroup: drawnItems }
+}).addTo(map);
+
+let currentAOI = null;
+
+map.on(L.Draw.Event.CREATED, e => {
+  drawnItems.clearLayers();
+  drawnItems.addLayer(e.layer);
+  currentAOI = e.layer;
+  updateAOIInfo();
+});
+
+map.on(L.Draw.Event.DELETED, () => {
+  currentAOI = null;
+  updateAOIInfo();
+});
+
+function updateAOIInfo() {
+  const el = document.getElementById('aoi-info');
+  if (!currentAOI) {
+    el.innerHTML = 'No AOI drawn — use the ✏ tool on the map';
+    return;
+  }
+  const bounds = currentAOI.getBounds();
+  const sw = bounds.getSouthWest(), ne = bounds.getNorthEast();
+  const latSpan = Math.abs(ne.lat - sw.lat);
+  const lngSpan = Math.abs(ne.lng - sw.lng);
+  const areaDeg2 = (latSpan * lngSpan).toFixed(3);
+  el.innerHTML = `
+    SW: <span>${sw.lat.toFixed(3)}°N, ${sw.lng.toFixed(3)}°E</span><br>
+    NE: <span>${ne.lat.toFixed(3)}°N, ${ne.lng.toFixed(3)}°E</span><br>
+    Area: <span>~${areaDeg2} deg²</span>
+  `;
+}
+
+function clearAOI() {
+  drawnItems.clearLayers();
+  currentAOI = null;
+  updateAOIInfo();
+  if (typeof sceneMarkers !== 'undefined') sceneMarkers.clearLayers();
+}
+
+function zoomSENigeria() {
+  map.fitBounds([[4.5, 6.0], [7.5, 9.5]]);
+  // Draw a default SE Nigeria rectangle
+  drawnItems.clearLayers();
+  const rect = L.rectangle([[4.8, 6.2], [7.2, 9.0]], {
+    color: '#00d4a1', weight: 2, fillOpacity: 0.08
+  }).addTo(drawnItems);
+  currentAOI = rect;
+  updateAOIInfo();
+  showToast('AOI set to Southeast Nigeria (5 states region)');
+}
+
+// ── SENSOR CONFIG ─────────────────────────────────────────────────────────────
+const SENSORS = {
+  S2: {
+    bands: ['B2 Blue','B3 Green','B4 Red','B5 RE1','B6 RE2','B7 RE3','B8 NIR','B8A RE4','B11 SWIR1','B12 SWIR2','SCL'],
+    formats: ['GeoTIFF','COG','SAFE'],
+    hasDates: true, hasCloud: true,
+    sources: ['Copernicus Open Access Hub', 'Google Earth Engine', 'AWS S3 (Requester Pays)']
+  },
+  S1: {
+    bands: ['VV','VH','VV+VH','Sigma0','Gamma0'],
+    formats: ['GeoTIFF', 'SAFE'],
+    hasDates: true, hasCloud: false,
+    sources: ['Copernicus Open Access Hub', 'ASF DAAC', 'Google Earth Engine']
+  },
+  L8: {
+    bands: ['B1 Coastal','B2 Blue','B3 Green','B4 Red','B5 NIR','B6 SWIR1','B7 SWIR2','B10 TIRS1','B11 TIRS2','QA_PIXEL'],
+    formats: ['GeoTIFF','COG'],
+    hasDates: true, hasCloud: true,
+    sources: ['USGS EarthExplorer', 'Google Earth Engine', 'AWS Open Data']
+  },
+  SRTM: {
+    bands: ['Elevation','Slope','Aspect','Hillshade'],
+    formats: ['GeoTIFF','HGT'],
+    hasDates: false, hasCloud: false,
+    sources: ['NASA Earthdata', 'OpenTopography', 'Google Earth Engine']
+  }
+};
+
+let activeSensor = 'S2';
+let activeBands  = new Set(['B2 Blue','B3 Green','B4 Red','B8 NIR','B8A RE4','B11 SWIR1']);
+
+const SENSORS_LABEL = { S2: 'Sentinel-2', S1: 'Sentinel-1', L8: 'Landsat 8/9', SRTM: 'SRTM DEM' };
+
+function selectSensor(el) {
+  document.querySelectorAll('.sensor-card').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  activeSensor = el.dataset.sensor;
+  const cfg = SENSORS[activeSensor];
+  // toggle date/cloud sections
+  document.getElementById('date-section').style.display = cfg.hasDates ? '' : 'none';
+  // reset bands
+  activeBands = new Set(cfg.bands.slice(0, 4));
+  renderBands();
+}
+
+function renderBands() {
+  const cfg = SENSORS[activeSensor];
+  const list = document.getElementById('band-list');
+  list.innerHTML = cfg.bands.map(b => `
+    <div class="band-pill ${activeBands.has(b) ? 'on' : ''}"
+         onclick="toggleBand(this,'${b}')">${b}</div>
+  `).join('');
+}
+
+function toggleBand(el, name) {
+  if (activeBands.has(name)) { activeBands.delete(name); el.classList.remove('on'); }
+  else { activeBands.add(name); el.classList.add('on'); }
+}
+
+renderBands(); // init
+
+function updateCloud(input) {
+  const v = input.value;
+  document.getElementById('cloud-val').textContent   = v + '%';
+  document.getElementById('cloud-label').textContent = v + '%';
+}
+
+// ── MOCK SCENE SEARCH ─────────────────────────────────────────────────────────
+function makeMockScenes() {
+  const sensor = activeSensor;
+  const start  = new Date(document.getElementById('date-start').value);
+  const end    = new Date(document.getElementById('date-end').value);
+  const maxCC  = parseInt(document.getElementById('cloud-slider').value);
+
+  const scenes = [];
+  let d = new Date(start);
+  let idx = 0;
+  const revisit = sensor === 'S2' ? 5 : sensor === 'S1' ? 12 : 16;
+
+  while (d <= end && scenes.length < 12) {
+    const cc = Math.round(Math.random() * 95);
+    if (cc <= maxCC) {
+      scenes.push({
+        id: `SCN_${sensor}_${idx++}`,
+        date: d.toISOString().slice(0,10),
+        sensor,
+        cloudCover: cc,
+        orbit: sensor === 'S1' ? ['ASC','DESC'][idx % 2] : null,
+        tile: sensor === 'S2' ? `32NNM` : sensor === 'L8' ? `189/055` : null,
+        size: (80 + Math.random() * 400).toFixed(0),
+        bands: [...activeBands]
+      });
+    }
+    d = new Date(d.getTime() + revisit * 24 * 3600 * 1000);
+  }
+  return scenes;
+}
+
+let sceneMarkers = L.layerGroup().addTo(map);
+
+// Real swath/tile dimensions (km) for each sensor
+const FOOTPRINT_KM = {
+  S2:   { w: 109.8, h: 109.8, label: 'Sentinel-2 MGRS Tile (110 × 110 km)' },
+  L8:   { w: 185,   h: 180,   label: 'Landsat Path/Row Scene (185 × 180 km)' },
+  S1:   { w: 250,   h: 170,   label: 'Sentinel-1 IW Swath (~250 × 170 km)' },
+  SRTM: { w: 111.3, h: 111.3, label: 'SRTM 1° × 1° Tile (~111 × 111 km)' }
+};
+
+// Convert a km width/height to a lat/lng span centered at a given latitude
+function kmToDegSpan(wKm, hKm, atLat) {
+  const latSpan = hKm / 110.574; // km per degree latitude (~constant)
+  const lngSpan = wKm / (111.320 * Math.cos(atLat * Math.PI / 180));
+  return { latSpan, lngSpan };
+}
+
+function drawSceneFootprint(scenes) {
+  sceneMarkers.clearLayers();
+  if (!scenes.length || !currentAOI) return;
+
+  const fp = FOOTPRINT_KM[activeSensor] || FOOTPRINT_KM.S2;
+  const aoiBounds = currentAOI.getBounds();
+  const center = aoiBounds.getCenter();
+
+  const { latSpan, lngSpan } = kmToDegSpan(fp.w, fp.h, center.lat);
+
+  const south = center.lat - latSpan / 2;
+  const north = center.lat + latSpan / 2;
+  const west  = center.lng - lngSpan / 2;
+  const east  = center.lng + lngSpan / 2;
+
+  const rect = L.rectangle([[south, west], [north, east]], {
+    color: '#00d4a1', weight: 1.5, fillOpacity: 0.04,
+    dashArray: '6,4', interactive: true
+  }).addTo(sceneMarkers);
+
+  const tileId = scenes[0].tile ? scenes[0].tile : '—';
+  rect.bindPopup(`
+    <b>${fp.label}</b><br>
+    Tile / Path-Row: <b>${tileId}</b><br>
+    ${scenes.length} scene${scenes.length > 1 ? 's' : ''} available in date range<br>
+    <span style="color:#6b8fa8;font-size:11px;">Actual footprint size — repeats for every overpass of this tile</span>
+  `);
+
+  // Small dots along the footprint edge marking each scene's acquisition (same location, real S2/Landsat repeat geometry)
+  scenes.forEach((s, i) => {
+    const t = (i + 0.5) / scenes.length;
+    const lat = north - t * latSpan * 0.06; // cluster near top edge, tiny offset per scene
+    const lng = west + lngSpan * (0.06 + 0.88 * t);
+    L.circleMarker([lat, lng], {
+      radius: 4, color: '#00d4a1', fillColor: '#00d4a1',
+      fillOpacity: 0.6, weight: 1
+    }).bindPopup(`<b>${s.date}</b><br>${SENSORS_LABEL[s.sensor]} · CC: ${s.cloudCover}%<br>Tile: ${s.tile || '—'}`)
+      .addTo(sceneMarkers);
+  });
+
+  // Fit map to show both AOI and footprint
+  map.fitBounds(rect.getBounds().pad(0.05));
+}
+
+function searchScenes() {
+  if (!currentAOI) {
+    showToast('⚠ Draw an AOI on the map first', true);
+    return;
+  }
+
+  const btn = document.getElementById('search-btn');
+  btn.innerHTML = '<div class="spin"></div> Searching…';
+  btn.disabled = true;
+
+  setTimeout(() => {
+    btn.innerHTML = '<span>🔍</span> Search Scenes';
+    btn.disabled = false;
+
+    const scenes = makeMockScenes();
+    renderScenes(scenes);
+    drawSceneFootprint(scenes);
+
+    showToast(`Found ${scenes.length} scenes for ${activeSensor}`);
+  }, 900);
+}
+
+function renderScenes(scenes) {
+  const panel  = document.getElementById('results-panel');
+  const sidebar = document.getElementById('sidebar');
+  const countEl = document.getElementById('results-count');
+
+  sidebar.classList.add('has-results');
+
+  if (!scenes.length) {
+    countEl.textContent = '0 scenes';
+    panel.innerHTML = `<div id="empty-state"><div class="icon">☁</div><p>No scenes found. Try relaxing cloud cover or extending the date range.</p></div>`;
+    return;
+  }
+
+  countEl.textContent = `${scenes.length} scene${scenes.length > 1 ? 's' : ''}`;
+
+  panel.innerHTML = scenes.map((s, i) => {
+    const ccClass = s.cloudCover < 20 ? 'cloud-low' : s.cloudCover < 60 ? 'cloud-mid' : 'cloud-high';
+    const meta = [
+      s.tile   ? ['Tile / Path', s.tile]     : null,
+      s.orbit  ? ['Orbit dir.', s.orbit]     : null,
+      ['Est. size', s.size + ' MB'],
+      ['Bands', s.bands.slice(0,4).join(', ') + (s.bands.length > 4 ? ' …' : '')],
+      ['Source', SENSORS[s.sensor].sources[0]]
+    ].filter(Boolean);
+
+    return `
+    <div class="scene-card" id="card-${i}">
+      <div class="scene-header" onclick="toggleScene(${i})">
+        <div class="scene-info">
+          <div class="scene-date">${s.date}</div>
+          <div class="scene-sensor">${SENSORS_LABEL[s.sensor]} &mdash; Scene ${i+1} of ${scenes.length}</div>
+        </div>
+        <div class="cloud-badge ${ccClass}">Cloud ${s.cloudCover}%</div>
+        <button class="dl-card-btn" title="Download from AWS S3"
+          onclick="event.stopPropagation();downloadScene(${i})">Download</button>
+      </div>
+      <div class="scene-body" id="body-${i}">
+        ${meta.map(([k,v]) => `<div class="meta-row"><span>${k}</span><span>${v}</span></div>`).join('')}
+        <div class="dl-row">
+          <button class="dl-btn primary" onclick="downloadScene(${i})">AWS S3 / Download</button>
+          <button class="dl-btn" onclick="openSource('${s.sensor}')">Open Source</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // attach scene data to DOM nodes so modal can read them
+  scenes.forEach((s, i) => {
+    document.getElementById(`card-${i}`)._scene = s;
+  });
+}
+
+function toggleScene(i) {
+  const body = document.getElementById(`body-${i}`);
+  body.classList.toggle('open');
+}
+
+// ── AWS S3 URL BUILDERS ────────────────────────────────────────────────────────
+
+// Sentinel-2 on AWS: s3://sentinel-s2-l2a/tiles/{UTM_ZONE}/{LAT_BAND}/{GRID_SQ}/{YEAR}/{MONTH}/{DAY}/{SEQ}/
+// Public HTTPS base: https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/{zone}/{latBand}/{gridSq}/{year}/{scene_id}/
+const S2_BAND_FILES = {
+  'B2 Blue':  { file: 'B02.tif',  size: '~95 MB'  },
+  'B3 Green': { file: 'B03.tif',  size: '~95 MB'  },
+  'B4 Red':   { file: 'B04.tif',  size: '~95 MB'  },
+  'B5 RE1':   { file: 'B05.tif',  size: '~25 MB'  },
+  'B6 RE2':   { file: 'B06.tif',  size: '~25 MB'  },
+  'B7 RE3':   { file: 'B07.tif',  size: '~25 MB'  },
+  'B8 NIR':   { file: 'B08.tif',  size: '~95 MB'  },
+  'B8A RE4':  { file: 'B8A.tif',  size: '~25 MB'  },
+  'B11 SWIR1':{ file: 'B11.tif',  size: '~25 MB'  },
+  'B12 SWIR2':{ file: 'B12.tif',  size: '~25 MB'  },
+  'SCL':      { file: 'SCL.tif',  size: '~4 MB'   },
+};
+
+// Landsat on AWS: s3://usgs-landsat/collection02/level-2/standard/oli-tirs/{year}/{path}/{row}/{scene_id}/
+const L8_BAND_FILES = {
+  'B1 Coastal': { file: '_SR_B1.TIF', size: '~60 MB' },
+  'B2 Blue':    { file: '_SR_B2.TIF', size: '~60 MB' },
+  'B3 Green':   { file: '_SR_B3.TIF', size: '~60 MB' },
+  'B4 Red':     { file: '_SR_B4.TIF', size: '~60 MB' },
+  'B5 NIR':     { file: '_SR_B5.TIF', size: '~60 MB' },
+  'B6 SWIR1':   { file: '_SR_B6.TIF', size: '~60 MB' },
+  'B7 SWIR2':   { file: '_SR_B7.TIF', size: '~60 MB' },
+  'B10 TIRS1':  { file: '_ST_B10.TIF',size: '~60 MB' },
+  'B11 TIRS2':  { file: '_ST_B11.TIF',size: '~60 MB' },
+  'QA_PIXEL':   { file: '_QA_PIXEL.TIF', size: '~10 MB' },
+};
+
+// SRTM on AWS OpenTopography / NASA
+const SRTM_FILES = {
+  'Elevation': { url: 'https://s3.amazonaws.com/elevation-tiles-prod/geotiff/', file: 'srtm_nigeria_elevation.tif', size: '~40 MB' },
+  'Slope':     { url: 'https://s3.amazonaws.com/elevation-tiles-prod/geotiff/', file: 'srtm_nigeria_slope.tif',     size: '~40 MB' },
+  'Aspect':    { url: 'https://s3.amazonaws.com/elevation-tiles-prod/geotiff/', file: 'srtm_nigeria_aspect.tif',    size: '~40 MB' },
+  'Hillshade': { url: 'https://s3.amazonaws.com/elevation-tiles-prod/geotiff/', file: 'srtm_nigeria_hillshade.tif', size: '~40 MB' },
+};
+
+function buildS3Links(scene) {
+  const links = [];
+
+  if (scene.sensor === 'S2') {
+    // Parse tile e.g. "32NNM" → zone=32, latBand=N, gridSq=NM
+    const tile = scene.tile || '32NNM';
+    const zone = tile.slice(0,2);
+    const latB = tile[2];
+    const grid = tile.slice(3);
+    const [y, m, d] = scene.date.split('-');
+    const mo = parseInt(m);
+    // Scene ID format used by Element84 COG archive
+    const sceneId = `S2A_${tile}_${y}${m}${d}_0_L2A`;
+    const base = `https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/${zone}/${latB}/${grid}/${y}/${mo}/${sceneId}`;
+
+    scene.bands.forEach(b => {
+      const bf = S2_BAND_FILES[b];
+      if (bf) links.push({
+        label: b,
+        url:   `${base}/${bf.file}`,
+        s3:    `s3://sentinel-cogs/sentinel-s2-l2a-cogs/${zone}/${latB}/${grid}/${y}/${mo}/${sceneId}/${bf.file}`,
+        file:  bf.file,
+        size:  bf.size,
+        icon:  '🟩'
+      });
+    });
+    // Always add TileInfo JSON
+    links.push({
+      label: 'tileInfo.json',
+      url:   `${base}/tileInfo.json`,
+      s3:    `s3://sentinel-cogs/sentinel-s2-l2a-cogs/${zone}/${latB}/${grid}/${y}/${mo}/${sceneId}/tileInfo.json`,
+      file:  'tileInfo.json', size: '< 1 KB', icon: '📄'
+    });
+
+  } else if (scene.sensor === 'L8') {
+    const [pathStr, rowStr] = (scene.tile || '189/055').split('/');
+    const path = pathStr.padStart(3,'0');
+    const row  = rowStr.padStart(3,'0');
+    const [y]  = scene.date.split('-');
+    const sceneId = `LC08_L2SP_${path}${row}_${scene.date.replace(/-/g,'')}_20230101_02_T1`;
+    const base = `https://landsatonaws.com/L8/${path}/${row}/${sceneId}`;
+    const s3base = `s3://usgs-landsat/collection02/level-2/standard/oli-tirs/${y}/${path}/${row}/${sceneId}`;
+
+    scene.bands.forEach(b => {
+      const bf = L8_BAND_FILES[b];
+      if (bf) links.push({
+        label: b,
+        url:   `https://landsatonaws.com/L8/${path}/${row}/${sceneId}`,
+        s3:    `${s3base}/${sceneId}${bf.file}`,
+        file:  `${sceneId}${bf.file}`,
+        size:  bf.size,
+        icon:  '🟦'
+      });
+    });
+    links.push({
+      label: 'MTL.txt (metadata)',
+      url:   `${base}`,
+      s3:    `${s3base}/${sceneId}_MTL.txt`,
+      file:  `${sceneId}_MTL.txt`, size: '~10 KB', icon: '📄'
+    });
+
+  } else if (scene.sensor === 'S1') {
+    // Sentinel-1 on Copernicus / ASF (not on AWS Open Data free tier for SAR)
+    links.push({
+      label: 'Note',
+      url:   'https://search.asf.alaska.edu/',
+      s3:    'https://search.asf.alaska.edu/#/?dataset=SENTINEL-1',
+      file:  '— SAR via ASF DAAC (free account required)',
+      size:  '~800 MB/scene', icon: '📡'
+    });
+
+  } else if (scene.sensor === 'SRTM') {
+    scene.bands.forEach(b => {
+      const sf = SRTM_FILES[b];
+      if (sf) links.push({
+        label: b,
+        url:   'https://portal.opentopography.org/raster?opentopoID=OMSRTM.042013.4326.1',
+        s3:    `s3://raster/AWSElevation/ELEV/World_10m/srtm/${sf.file}`,
+        file:  sf.file, size: sf.size, icon: '⛰'
+      });
+    });
+  }
+  return links;
+}
+
+// current modal scene
+let _modalScene = null;
+let _modalLinks = [];
+
+function downloadScene(sceneIdx) {
+  const card = document.getElementById(`card-${sceneIdx}`);
+  _modalScene = card._scene;
+  _modalLinks = buildS3Links(_modalScene);
+  openS3Modal(_modalScene, _modalLinks);
+}
+
+function openS3Modal(scene, links) {
+  document.getElementById('modal-title').textContent = `↓ ${scene.sensor} · ${scene.date}`;
+  document.getElementById('modal-sub').textContent =
+    `${links.length} files · Cloud cover ${scene.cloudCover}% · Scene ${scene.id}`;
+
+  // ── FILES TAB ──
+  const fileList = document.getElementById('s3-file-list');
+  if (!links.length) {
+    fileList.innerHTML = '<div style="color:var(--muted);font-size:12px;">No files available for this sensor via AWS Open Data.</div>';
+  } else {
+    const groups = {};
+    links.forEach(l => {
+      const g = l.icon === '📄' ? 'Metadata' : 'Band files';
+      if (!groups[g]) groups[g] = [];
+      groups[g].push(l);
+    });
+    fileList.innerHTML = Object.entries(groups).map(([grp, items]) => `
+      <div class="s3-group">
+        <div class="s3-group-title">${grp}</div>
+        ${items.map(l => `
+          <div class="s3-link-row">
+            <span class="s3-icon">${l.icon}</span>
+            <span class="s3-path" title="${l.s3}">${l.s3}</span>
+            <span class="s3-size">${l.size}</span>
+            <button class="s3-copy-btn" onclick="copyText('${l.s3.replace(/'/g,"\\'")}', this)">Copy</button>
+            <a class="s3-open-btn" href="${l.url}" target="_blank" rel="noopener">Open ↗</a>
+          </div>
+        `).join('')}
+      </div>
+    `).join('');
+  }
+
+  // ── WGET TAB ──
+  const wgetLines = links
+    .filter(l => l.url && !l.url.includes('asf.alaska') && !l.url.includes('opentopography'))
+    .map(l => `wget -c "${l.url}" -O "${l.file}"`)
+    .join('\n');
+  document.getElementById('wget-box').innerHTML =
+    `<span class="cmd-kw">#!/bin/bash</span>\n# Sentinel/Landsat AWS Open Data — no auth required\n\n` +
+    links.filter(l => l.url && !l.url.includes('asf') && !l.url.includes('opentopo'))
+         .map(l => `<span class="cmd-kw">wget</span> -c <span class="cmd-url">"${l.url}"</span> -O "${l.file}"`)
+         .join('\n') +
+    `\n\n<span class="cmd-kw">echo</span> "All files downloaded."`;
+
+  // ── GDAL TAB ──
+  document.getElementById('gdal-box').innerHTML = links
+    .filter(l => l.icon !== '📄')
+    .map(l => `<span class="cmd-kw">gdalinfo</span> <span class="cmd-url">"/vsicurl/${l.url}"</span>\n` +
+               `<span class="cmd-kw">gdal_translate</span> <span class="cmd-url">"/vsicurl/${l.url}"</span> "${l.file}"`)
+    .join('\n\n');
+
+  // reset tabs
+  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', i===0));
+  document.querySelectorAll('.tab-panel').forEach((p,i) => p.classList.toggle('active', i===0));
+
+  document.getElementById('s3-modal-overlay').classList.add('open');
+}
+
+function closeS3Modal(e) {
+  if (!e || e.target === document.getElementById('s3-modal-overlay')) {
+    document.getElementById('s3-modal-overlay').classList.remove('open');
+  }
+}
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied';
+    btn.style.color = 'var(--accent)';
+    setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+  });
+}
+
+function copyWget() {
+  const raw = document.getElementById('wget-box').textContent;
+  navigator.clipboard.writeText(raw).then(() => showToast('wget script copied!'));
+}
+function copyGdal() {
+  const raw = document.getElementById('gdal-box').textContent;
+  navigator.clipboard.writeText(raw).then(() => showToast('GDAL commands copied!'));
+}
+
+function downloadManifest() {
+  if (!_modalLinks.length) return;
+  const lines = [
+    `# EO Data Explorer — Ecosynthra Lab`,
+    `# Scene: ${_modalScene.id}  Date: ${_modalScene.date}  Sensor: ${_modalScene.sensor}`,
+    `# Generated: ${new Date().toISOString()}`,
+    ``,
+    `## S3 paths (use: aws s3 cp <path> .)`,
+    ..._modalLinks.map(l => l.s3),
+    ``,
+    `## HTTPS download URLs`,
+    ..._modalLinks.map(l => l.url),
+  ].join('\n');
+  const blob = new Blob([lines], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${_modalScene.id}_manifest.txt`;
+  a.click();
+}
+
+const SOURCE_URLS = {
+  S2:   'https://dataspace.copernicus.eu/',
+  S1:   'https://search.asf.alaska.edu/',
+  L8:   'https://landsatonaws.com/',
+  SRTM: 'https://portal.opentopography.org/'
+};
+
+function openSource(sensor) {
+  window.open(SOURCE_URLS[sensor], '_blank');
+}
+
+// ── TOAST ─────────────────────────────────────────────────────────────────────
+function showToast(msg, warn=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = warn ? '#f59e0b' : 'var(--accent)';
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+// ── INITIAL ZOOM ──────────────────────────────────────────────────────────────
+map.fitBounds([[4.5, 6.0], [7.5, 9.5]]);
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PANEL SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+function openPanel(name) {
+  closeAllPanels();
+  document.getElementById('panel-' + name).classList.add('open');
+  document.getElementById('panel-backdrop').style.display = 'block';
+  if (name === 'teach') renderCombos();
+  if (name === 'gee')   generateGEE();
+}
+function closePanel(name) {
+  document.getElementById('panel-' + name).classList.remove('open');
+  document.getElementById('panel-backdrop').style.display = 'none';
+}
+function closeAllPanels() {
+  document.querySelectorAll('.rpanel').forEach(p => p.classList.remove('open'));
+  document.getElementById('panel-backdrop').style.display = 'none';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEACHING LAYER — BAND COMBINATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+const COMBOS = [
+  {
+    id: 'tci',
+    name: 'True Colour (TCI)',
+    emoji: '🌿',
+    bg: 'linear-gradient(135deg,#2d6a4f,#52b788)',
+    bands: ['B4 Red','B3 Green','B2 Blue'],
+    sensor: 'S2',
+    formula: 'RGB = (B04, B03, B02)',
+    desc: 'Displays the scene as the human eye would see it. Useful for general landscape interpretation, identifying water bodies, settlements, and checking image quality.',
+    use: 'Best for: site orientation, land cover overview, student familiarisation with imagery.'
+  },
+  {
+    id: 'fci',
+    name: 'False Colour Infrared (FCI)',
+    emoji: '🔴',
+    bg: 'linear-gradient(135deg,#9d0208,#e85d04)',
+    bands: ['B8 NIR','B4 Red','B3 Green'],
+    sensor: 'S2',
+    formula: 'RGB = (B08, B04, B03)\nHealthy vegetation → bright red/magenta',
+    desc: 'Exploits the high NIR reflectance of healthy green vegetation. Diseased, stressed, or invaded vegetation appears dull pink or cyan. Classic for crop health and forest monitoring.',
+    use: 'Best for: distinguishing native forest from Chromolaena-invaded patches; detecting stressed vegetation.'
+  },
+  {
+    id: 'ndvi',
+    name: 'NDVI — Vegetation Index',
+    emoji: '🟩',
+    bg: 'linear-gradient(135deg,#386641,#6a994e)',
+    bands: ['B8 NIR','B4 Red'],
+    sensor: 'S2',
+    formula: 'NDVI = (B08 − B04) / (B08 + B04)\nRange: −1 to +1\n  > 0.5 → dense vegetation\n  0.2–0.5 → moderate/sparse\n  < 0.2 → bare soil / urban',
+    desc: 'The most widely used vegetation index. Measures the ratio of NIR absorption vs red reflectance — healthy leaves absorb red and strongly reflect NIR.',
+    use: 'Best for: mapping invasive plant extent; phenology monitoring; August Break analysis.'
+  },
+  {
+    id: 'evi',
+    name: 'EVI — Enhanced Vegetation Index',
+    emoji: '🌲',
+    bg: 'linear-gradient(135deg,#1b4332,#40916c)',
+    bands: ['B8 NIR','B4 Red','B2 Blue'],
+    sensor: 'S2',
+    formula: 'EVI = 2.5 × (B08 − B04) / (B08 + 6·B04 − 7.5·B02 + 1)\nCorrects for: atmospheric effects, canopy background',
+    desc: 'Improves on NDVI in dense canopy conditions by correcting for atmospheric scattering and soil background — important in humid tropical forests of SE Nigeria.',
+    use: 'Best for: closed-canopy mapping; humid Guinea forest zones; comparing with NDVI to detect saturation artefacts.'
+  },
+  {
+    id: 'swir',
+    name: 'SWIR Composite',
+    emoji: '🟤',
+    bg: 'linear-gradient(135deg,#7b2d00,#c1440e)',
+    bands: ['B12 SWIR2','B8A RE4','B4 Red'],
+    sensor: 'S2',
+    formula: 'RGB = (B12, B8A, B04)\nMoist soil → bright; dry/bare → dark',
+    desc: 'Short-wave infrared is sensitive to moisture content in both vegetation and soil. Clearly separates moist from dry vegetation — useful after the August Break.',
+    use: 'Best for: soil moisture mapping; distinguishing Mimosa invisa thickets (high moisture) from dry shrubland.'
+  },
+  {
+    id: 'redge',
+    name: 'Red-Edge Composite',
+    emoji: '🟣',
+    bg: 'linear-gradient(135deg,#5c4d7d,#9b72cf)',
+    bands: ['B8A RE4','B6 RE2','B4 Red'],
+    sensor: 'S2',
+    formula: 'RGB = (B8A, B06, B04)\nSentinel-2 exclusive — Landsat lacks red-edge',
+    desc: 'The red-edge bands (B05–B07, B8A) sit at the transition between red absorption and NIR reflectance. This region is extremely sensitive to chlorophyll content and plant stress — earlier indicator than NDVI.',
+    use: 'Best for: early-stress detection in native species adjacent to IAPS; canopy health gradients; Chromolaena boundary mapping.'
+  },
+  {
+    id: 'ndwi',
+    name: 'NDWI — Water Index',
+    emoji: '💧',
+    bg: 'linear-gradient(135deg,#023e8a,#0096c7)',
+    bands: ['B3 Green','B8 NIR'],
+    sensor: 'S2',
+    formula: 'NDWI = (B03 − B08) / (B03 + B08)\n  > 0 → open water\n  0 to −0.1 → flooded/saturated soil\n  < −0.1 → dry land',
+    desc: 'Delineates open water bodies and waterlogged areas. Important because Mimosa pigra preferentially invades river margins and floodplains.',
+    use: 'Best for: mapping riparian invasion corridors; locating wetland habitats at risk from M. pigra.'
+  },
+  {
+    id: 'sar-vh',
+    name: 'SAR — VV/VH Ratio',
+    emoji: '📡',
+    bg: 'linear-gradient(135deg,#1d3557,#457b9d)',
+    bands: ['VV','VH'],
+    sensor: 'S1',
+    formula: 'RGB = (VV, VH, VV/VH)\nHigh VH → complex canopy structure\nLow VV → smooth water/bare',
+    desc: 'Sentinel-1 SAR penetrates cloud cover — critical for rainy season mapping in SE Nigeria. VH polarisation is sensitive to volume scattering (leaf/branch structure); VV to surface roughness.',
+    use: 'Best for: cloud-season mapping (May–Oct); distinguishing shrubby IAPS from smooth grassland even under cloud.'
+  },
+  {
+    id: 'dem',
+    name: 'DEM — Terrain Analysis',
+    emoji: '⛰',
+    bg: 'linear-gradient(135deg,#4a4e69,#9a8c98)',
+    bands: ['Elevation','Slope','Aspect'],
+    sensor: 'SRTM',
+    formula: 'Slope = atan(√(dz/dx² + dz/dy²))\nAspect = atan2(−dz/dx, dz/dy)',
+    desc: 'Topographic data controls drainage, soil moisture, and microclimate — all factors that shape IAPS invasion pathways. Slope and aspect derived from SRTM 30m elevation.',
+    use: 'Best for: predicting invasion-prone valleys and riparian corridors; selecting field sampling sites; drainage network extraction.'
+  },
+];
+
+let activeCombo = null;
+
+function renderCombos() {
+  const grid = document.getElementById('combo-grid');
+  grid.innerHTML = COMBOS.map(co => `
+    <div class="combo-card" id="combo-${co.id}" onclick="toggleCombo('${co.id}')">
+      <div class="combo-head">
+        <div class="combo-swatch" style="background:${co.bg}">${co.emoji}</div>
+        <div style="flex:1;min-width:0;">
+          <div class="combo-title">${co.name}</div>
+          <div class="combo-tags">
+            ${co.bands.map(b => `<span class="combo-tag">${b}</span>`).join('')}
+            <span class="combo-tag" style="border-color:rgba(0,212,161,0.3);color:var(--accent);">${co.sensor}</span>
+          </div>
+        </div>
+        <div style="font-size:16px;color:var(--muted);padding-left:6px;" id="chevron-${co.id}">›</div>
+      </div>
+      <div class="combo-body" id="cbody-${co.id}">
+        <div class="combo-desc">${co.desc}</div>
+        <div class="combo-formula">${co.formula}</div>
+        <div class="combo-use">&#128270; ${co.use}</div>
+        <button class="combo-apply-btn" onclick="applyCombo('${co.id}',event)">
+          &#9654; Apply bands in explorer
+        </button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function toggleCombo(id) {
+  const body = document.getElementById('cbody-' + id);
+  const chev = document.getElementById('chevron-' + id);
+  const card = document.getElementById('combo-' + id);
+  const isOpen = body.classList.contains('open');
+  // close all
+  document.querySelectorAll('.combo-body').forEach(b => b.classList.remove('open'));
+  document.querySelectorAll('[id^=chevron-]').forEach(c => { c.textContent = '›'; c.style.transform = ''; });
+  document.querySelectorAll('.combo-card').forEach(c => c.classList.remove('active'));
+  if (!isOpen) {
+    body.classList.add('open');
+    chev.textContent = '›';
+    chev.style.transform = 'rotate(90deg)';
+    card.classList.add('active');
+  }
+}
+
+function applyCombo(id, e) {
+  e.stopPropagation();
+  const co = COMBOS.find(c => c.id === id);
+  if (!co) return;
+  // Switch sensor
+  const sensorCards = document.querySelectorAll('.sensor-card');
+  sensorCards.forEach(sc => {
+    if (sc.dataset.sensor === co.sensor) { sc.click(); }
+  });
+  // Set bands
+  setTimeout(() => {
+    activeBands = new Set(co.bands);
+    renderBands();
+    showToast('Applied: ' + co.name);
+    closePanel('teach');
+  }, 80);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GEE SCRIPT GENERATOR
+// ═══════════════════════════════════════════════════════════════════════════
+let geeOutputType = 'visualize';
+const geeIndices  = new Set();
+
+function setGeeOut(el) {
+  document.querySelectorAll('[data-out]').forEach(p => p.classList.remove('on'));
+  el.classList.add('on');
+  geeOutputType = el.dataset.out;
+  generateGEE();
+}
+function toggleGeeIdx(el) {
+  const idx = el.dataset.idx;
+  if (geeIndices.has(idx)) { geeIndices.delete(idx); el.classList.remove('on'); }
+  else { geeIndices.add(idx); el.classList.add('on'); }
+  generateGEE();
+}
+
+function getAOICoords() {
+  if (!currentAOI) return null;
+  const b = currentAOI.getBounds();
+  const sw = b.getSouthWest(), ne = b.getNorthEast();
+  return { sw, ne,
+    geeList: `[${sw.lng.toFixed(4)}, ${sw.lat.toFixed(4)}, ${ne.lng.toFixed(4)}, ${ne.lat.toFixed(4)}]`
+  };
+}
+
+const GEE_COLLECTIONS = {
+  S2: { id: 'COPERNICUS/S2_SR_HARMONIZED', cloudProp: 'CLOUDY_PIXEL_PERCENTAGE' },
+  S1: { id: 'COPERNICUS/S1_GRD', cloudProp: null },
+  L8: { id: 'LANDSAT/LC08/C02/T1_L2', cloudProp: 'CLOUD_COVER' },
+  SRTM: { id: 'USGS/SRTMGL1_003', cloudProp: null }
+};
+
+const S2_GEE_BANDS = {
+  'B2 Blue':'B2','B3 Green':'B3','B4 Red':'B4','B5 RE1':'B5','B6 RE2':'B6',
+  'B7 RE3':'B7','B8 NIR':'B8','B8A RE4':'B8A','B11 SWIR1':'B11','B12 SWIR2':'B12','SCL':'SCL'
+};
+const L8_GEE_BANDS = {
+  'B1 Coastal':'SR_B1','B2 Blue':'SR_B2','B3 Green':'SR_B3','B4 Red':'SR_B4',
+  'B5 NIR':'SR_B5','B6 SWIR1':'SR_B6','B7 SWIR2':'SR_B7','QA_PIXEL':'QA_PIXEL'
+};
+const S1_GEE_BANDS = { 'VV':'VV','VH':'VH' };
+
+function resolveGeeBands() {
+  const map = activeSensor === 'S2' ? S2_GEE_BANDS
+            : activeSensor === 'L8' ? L8_GEE_BANDS
+            : activeSensor === 'S1' ? S1_GEE_BANDS : {};
+  return [...activeBands].map(b => map[b] || b).filter(Boolean);
+}
+
+const INDEX_CODE = {
+  NDVI: `var ndvi = img.normalizedDifference(['B8','B4']).rename('NDVI');
+  img = img.addBands(ndvi);`,
+  EVI:  `var evi = img.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
+    {NIR: img.select('B8'), RED: img.select('B4'), BLUE: img.select('B2')}
+  ).rename('EVI');
+  img = img.addBands(evi);`,
+  NDWI: `var ndwi = img.normalizedDifference(['B3','B8']).rename('NDWI');
+  img = img.addBands(ndwi);`,
+  NBR:  `var nbr = img.normalizedDifference(['B8','B12']).rename('NBR');
+  img = img.addBands(nbr);`,
+  SAVI: `var savi = img.expression(
+    '1.5 * (NIR - RED) / (NIR + RED + 0.5)',
+    {NIR: img.select('B8'), RED: img.select('B4')}
+  ).rename('SAVI');
+  img = img.addBands(savi);`,
+  CRI:  `// Carotenoid Reflectance Index — sensitive to stress in broadleaf invaders
+  var cri = img.expression(
+    '(1/B2) - (1/B3)',
+    {B2: img.select('B2'), B3: img.select('B3')}
+  ).rename('CRI');
+  img = img.addBands(cri);`
+};
+
+function generateGEE() {
+  const aoi  = getAOICoords();
+  const col  = GEE_COLLECTIONS[activeSensor];
+  const ds   = document.getElementById('date-start').value;
+  const de   = document.getElementById('date-end').value;
+  const cc   = document.getElementById('cloud-slider').value;
+  const bands = resolveGeeBands();
+  const isSRTM = activeSensor === 'SRTM';
+
+  const aoiStr = aoi
+    ? `ee.Geometry.Rectangle(${aoi.geeList})`
+    : `ee.Geometry.Rectangle([6.0, 4.8, 9.0, 7.2]) // SE Nigeria default`;
+
+  let script = '';
+
+  // Header comment
+  script += `// ═══════════════════════════════════════════════════════
+// EO Data Explorer — Ecosynthra Lab, UNIZIK
+// Sensor  : ${activeSensor}
+// Bands   : ${bands.join(', ') || '(all)'}
+// Date    : ${ds} → ${de}
+// AOI     : ${aoi ? `SW(${aoi.sw.lat.toFixed(3)},${aoi.sw.lng.toFixed(3)}) NE(${aoi.ne.lat.toFixed(3)},${aoi.ne.lng.toFixed(3)})` : 'SE Nigeria default'}
+// Generated: ${new Date().toISOString().slice(0,10)}
+// ═══════════════════════════════════════════════════════\n\n`;
+
+  // AOI
+  script += `var aoi = ${aoiStr};\nMap.centerObject(aoi, 10);\n\n`;
+
+  if (isSRTM) {
+    script += `// ── SRTM Elevation ──────────────────────────────────\n`;
+    script += `var dem = ee.Image('${col.id}').clip(aoi);\n`;
+    script += `var slope  = ee.Terrain.slope(dem);\n`;
+    script += `var aspect = ee.Terrain.aspect(dem);\n\n`;
+    script += `Map.addLayer(dem,    {min:0,   max:600, palette:['#0d0221','#5f0f40','#9a031e','#fb8b24','#e36414','#fff']}, 'Elevation');\n`;
+    script += `Map.addLayer(slope,  {min:0,   max:45,  palette:['#fff','#fdae61','#d73027']}, 'Slope (deg)');\n`;
+    script += `Map.addLayer(aspect, {min:0,   max:360, palette:['#d73027','#fee090','#4575b4','#d73027']}, 'Aspect');\n`;
+    if (geeOutputType === 'export_drive') {
+      script += `\n// Export elevation to Google Drive\nExport.image.toDrive({\n  image: dem,\n  description: 'SRTM_elevation_SE_Nigeria',\n  folder: 'EO_Explorer',\n  region: aoi,\n  scale: 30,\n  maxPixels: 1e9\n});\n`;
+    }
+  } else if (activeSensor === 'S1') {
+    script += `// ── Sentinel-1 SAR ──────────────────────────────────\n`;
+    script += `var s1 = ee.ImageCollection('${col.id}')\n`;
+    script += `  .filterBounds(aoi)\n`;
+    script += `  .filterDate('${ds}', '${de}')\n`;
+    script += `  .filter(ee.Filter.eq('instrumentMode', 'IW'))\n`;
+    script += `  .select(['VV','VH'])\n`;
+    script += `  .mean().clip(aoi);\n\n`;
+    script += `var ratio = s1.select('VV').divide(s1.select('VH')).rename('VV_VH');\n`;
+    script += `var composite = s1.addBands(ratio);\n\n`;
+    script += `Map.addLayer(composite, {bands:['VV','VH','VV_VH'], min:-25, max:5}, 'S1 VV/VH Composite');\n`;
+    if (geeOutputType === 'export_drive') {
+      script += `\nExport.image.toDrive({\n  image: composite,\n  description: 'S1_SAR_composite',\n  folder: 'EO_Explorer',\n  region: aoi, scale: 10, maxPixels: 1e9\n});\n`;
+    }
+  } else {
+    // S2 or L8
+    const scaleFactor = activeSensor === 'L8' ? `\n  // Apply L8 scale factors\n  var opticalBands = img.select('SR_B.').multiply(0.0000275).add(-0.2);\n  img = img.addBands(opticalBands, null, true);\n  return img;` : `  return img;`;
+    const cloudFilter = col.cloudProp ? `  .filter(ee.Filter.lte('${col.cloudProp}', ${cc}))` : '';
+    const bandSel = bands.length ? `  .select(['${bands.join("','")}'])` : '';
+
+    script += `// ── Image Collection ────────────────────────────────\n`;
+    script += `var col = ee.ImageCollection('${col.id}')\n`;
+    script += `  .filterBounds(aoi)\n`;
+    script += `  .filterDate('${ds}', '${de}')\n`;
+    if (cloudFilter) script += `${cloudFilter}\n`;
+
+    // Preprocessing function
+    script += `;\n\nfunction preprocess(img) {\n`;
+    if (activeSensor === 'L8') script += `  var opticalBands = img.select('SR_B.').multiply(0.0000275).add(-0.2);\n  img = img.addBands(opticalBands, null, true);\n`;
+    // Indices
+    if (geeIndices.size > 0) {
+      script += `  // Spectral indices\n`;
+      geeIndices.forEach(idx => {
+        if (INDEX_CODE[idx]) script += `  ${INDEX_CODE[idx].replace(/\n/g,'\n  ')}\n`;
+      });
+    }
+    script += `  return img;\n}\n\n`;
+
+    script += `var processed = col.map(preprocess);\n`;
+    script += `var composite = processed.median().clip(aoi);\n\n`;
+
+    // Vis params
+    if (activeSensor === 'S2') {
+      const visBands = bands.includes('B8') ? ['B8','B4','B3'] : bands.includes('B4') ? ['B4','B3','B2'] : bands.slice(0,3);
+      const vb = visBands.filter(b => bands.includes(b) || bands.some(ab => S2_GEE_BANDS[ab]===b));
+      script += `// Visualisation\n`;
+      script += `Map.addLayer(composite, {bands:['${(bands.slice(0,3).map(b=>S2_GEE_BANDS[b]||b)).join("','")}'], min:0, max:3000}, 'S2 Composite');\n`;
+    } else {
+      script += `Map.addLayer(composite, {bands:['SR_B5','SR_B4','SR_B3'], min:0, max:0.3}, 'L8 False Colour');\n`;
+    }
+
+    // Indices visualisation
+    geeIndices.forEach(idx => {
+      const palette = idx==='NDVI'||idx==='EVI'||idx==='SAVI' ? `['#d73027','#fee08b','#1a9850']`
+                    : idx==='NDWI' ? `['#a50026','#f46d43','#74add1','#313695']`
+                    : `['purple','white','green']`;
+      script += `Map.addLayer(composite.select('${idx}'), {min:-0.2,max:0.8,palette:${palette}}, '${idx}');\n`;
+    });
+
+    // Output types
+    if (geeOutputType === 'export_drive') {
+      script += `\n// ── Export to Google Drive ──────────────────────────\n`;
+      script += `Export.image.toDrive({\n  image: composite,\n  description: '${activeSensor}_composite_SE_Nigeria',\n  folder: 'EO_Explorer',\n  region: aoi,\n  scale: ${activeSensor==='S2'?10:30},\n  crs: 'EPSG:32632',\n  maxPixels: 1e9\n});\n`;
+    } else if (geeOutputType === 'export_asset') {
+      script += `\n// ── Export to GEE Asset ─────────────────────────────\n`;
+      script += `Export.image.toAsset({\n  image: composite,\n  description: '${activeSensor}_composite',\n  assetId: 'users/YOUR_USERNAME/${activeSensor}_composite_SE_Nigeria',\n  region: aoi,\n  scale: ${activeSensor==='S2'?10:30},\n  maxPixels: 1e9\n});\n`;
+    } else if (geeOutputType === 'timeseries') {
+      const tsband = geeIndices.has('NDVI') ? 'NDVI' : (activeSensor==='S2'?'B8':'SR_B5');
+      script += `\n// ── Time Series Chart ────────────────────────────────\n`;
+      script += `var chart = ui.Chart.image.series({\n  imageCollection: processed.select('${tsband}'),\n  region: aoi,\n  reducer: ee.Reducer.mean(),\n  scale: ${activeSensor==='S2'?20:30}\n}).setOptions({\n  title: '${tsband} Time Series — SE Nigeria',\n  vAxis: {title: '${tsband}'},\n  hAxis: {title: 'Date'}\n});\nprint(chart);\n`;
+    }
+  }
+
+  script += `\nMap.addLayer(ee.Image().paint(aoi, 0, 2), {palette:'#00d4a1'}, 'AOI boundary');\nprint('Scene count:', col.size());\n`;
+
+  // Syntax highlight
+  const highlighted = script
+    .replace(/\b(var|function|return|if|else|new|true|false|null)\b/g, '<span class="kw">$1</span>')
+    .replace(/'([^']+)'/g, "<span class='str'>'$1'</span>")
+    .replace(/\b(\d+\.?\d*)\b/g, '<span class="num">$1</span>')
+    .replace(/(\/\/[^\n]*)/g, '<span class="cmt">$1</span>')
+    .replace(/\b(ee\.\w+|Export\.\w+|Map\.\w+|ui\.Chart\.\w+|print)\b/g, '<span class="fn">$1</span>');
+
+  document.getElementById('gee-code-block').innerHTML = highlighted;
+  window._geeRawScript = script;
+}
+
+function copyGEE() {
+  if (!window._geeRawScript) { showToast('Click Generate first', true); return; }
+  navigator.clipboard.writeText(window._geeRawScript)
+    .then(() => showToast('GEE script copied — paste into code.earthengine.google.com'));
+}
+
+</script>
+</body>
+</html>
