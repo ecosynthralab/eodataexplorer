@@ -162,8 +162,10 @@
   }
   .scene-card {
     border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
-    background: var(--bg); transition: border-color 0.15s;
+    background: var(--bg); transition: border-color 0.15s, box-shadow 0.3s;
+    flex-shrink: 0; /* keep natural height — let the panel scroll instead of squeezing cards */
   }
+  .scene-card.flash-highlight { box-shadow: 0 0 0 2px var(--accent); }
   .scene-card:hover { border-color: var(--accent); }
   .scene-header {
     display: grid;
@@ -557,6 +559,11 @@
               <div class="s-res">30 m</div>
               <div class="s-tag">Elevation</div>
             </div>
+            <div class="sensor-card" data-sensor="CLIMATE" onclick="selectSensor(this)">
+              <div class="s-name">Climate</div>
+              <div class="s-res">~4 – 5.5 km</div>
+              <div class="s-tag">CHIRPS · TerraClimate · MODIS</div>
+            </div>
           </div>
         </div>
 
@@ -626,7 +633,14 @@
     </div>
 
     <!-- ── MAP ── -->
-    <div id="map"></div>
+    <div class="map-wrap" style="position:relative;flex:1;display:flex;min-width:0;">
+      <div id="map"></div>
+      <div id="map-legend" style="display:none;position:absolute;bottom:34px;left:12px;z-index:900;background:rgba(10,18,22,0.9);border:1px solid #2a3c42;border-radius:6px;padding:8px 10px;font-size:11px;color:#c9d8dd;line-height:1.7;">
+        <div><span style="display:inline-block;width:14px;height:0;border-top:2px solid #00d4a1;vertical-align:middle;margin-right:6px;"></span>Your AOI</div>
+        <div id="legend-real-row"><span style="display:inline-block;width:14px;height:0;border-top:2px dashed #8b5cf6;vertical-align:middle;margin-right:6px;"></span>Real satellite grid tile</div>
+        <div id="legend-illus-row" style="display:none;"><span style="display:inline-block;width:14px;height:0;border-top:2px dashed #ffb020;vertical-align:middle;margin-right:6px;"></span>Illustrative only (not real)</div>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -665,6 +679,7 @@
         <div class="gee-pill" data-out="export_drive" onclick="setGeeOut(this)">Export to Drive</div>
         <div class="gee-pill" data-out="export_asset" onclick="setGeeOut(this)">Export to Asset</div>
         <div class="gee-pill" data-out="timeseries" onclick="setGeeOut(this)">Time Series Chart</div>
+        <div class="gee-pill" data-out="export_csv" onclick="setGeeOut(this)">Export CSV (table)</div>
       </div>
     </div>
 
@@ -864,13 +879,20 @@ const SENSORS = {
     formats: ['GeoTIFF','HGT'],
     hasDates: false, hasCloud: false,
     sources: ['NASA Earthdata', 'OpenTopography', 'Google Earth Engine']
+  },
+  CLIMATE: {
+    bands: ['Precipitation (CHIRPS)','Max Temp (TerraClimate)','Min Temp (TerraClimate)',
+            'Soil Moisture (TerraClimate)','Actual ET (TerraClimate)','LST Day (MODIS)','LST Night (MODIS)'],
+    formats: ['GeoTIFF (via GEE export)'],
+    hasDates: true, hasCloud: false,
+    sources: ['Google Earth Engine (CHIRPS, TerraClimate, MODIS)']
   }
 };
 
 let activeSensor = 'S2';
 let activeBands  = new Set(['B2 Blue','B3 Green','B4 Red','B8 NIR','B8A RE4','B11 SWIR1']);
 
-const SENSORS_LABEL = { S2: 'Sentinel-2', S1: 'Sentinel-1', L8: 'Landsat 8/9', SRTM: 'SRTM DEM' };
+const SENSORS_LABEL = { S2: 'Sentinel-2', S1: 'Sentinel-1', L8: 'Landsat 8/9', SRTM: 'SRTM DEM', CLIMATE: 'Climate' };
 
 function selectSensor(el) {
   document.querySelectorAll('.sensor-card').forEach(c => c.classList.remove('active'));
@@ -906,7 +928,72 @@ function updateCloud(input) {
   document.getElementById('cloud-label').textContent = v + '%';
 }
 
+// Fetch a real LIST of scenes (not just the closest one) for the search
+// results panel, so dates, cloud cover, and footprints shown before you even
+// click Download are genuine — not the Math.random() placeholders below.
+const STAC_SCENE_COLLECTIONS = { S2: 'sentinel-2-l2a', L8: 'landsat-c2-l2', S1: 'sentinel-1-grd' };
+
+async function searchStacScenes(sensor, bbox, dateStartStr, dateEndStr, maxCloud) {
+  const collection = STAC_SCENE_COLLECTIONS[sensor];
+  if (!collection) return null; // sensor has no per-scene STAC collection (SRTM/CLIMATE)
+
+  const body = {
+    collections: [collection],
+    bbox,
+    datetime: `${dateStartStr}T00:00:00Z/${dateEndStr}T23:59:59Z`,
+    limit: 100,
+    sortby: [{ field: 'properties.datetime', direction: 'asc' }]
+  };
+  if (maxCloud != null && sensor !== 'S1') {
+    body.query = { 'eo:cloud_cover': { lte: Number(maxCloud) } };
+  }
+
+  let resp;
+  try {
+    resp = await fetch(STAC_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    throw new Error('Could not reach the Earth Search catalog (network/CORS error).');
+  }
+  if (!resp.ok) throw new Error(`Catalog search failed (HTTP ${resp.status}).`);
+  const data = await resp.json();
+  const feats = data.features || [];
+
+  // Evenly sample across the FULL sorted range rather than just taking the
+  // first N — a naive slice(0,12) on a year-long ascending-sorted search
+  // silently returns only the earliest scenes (e.g. all of January) even
+  // though the person asked for the whole year.
+  const DISPLAY_CAP = 15;
+  let sampled = feats;
+  if (feats.length > DISPLAY_CAP) {
+    const stride = feats.length / DISPLAY_CAP;
+    sampled = Array.from({ length: DISPLAY_CAP }, (_, i) => feats[Math.floor(i * stride)]);
+  }
+
+  return sampled.map(f => ({
+    id: f.id,
+    date: f.properties.datetime.slice(0, 10),
+    sensor,
+    cloudCover: typeof f.properties['eo:cloud_cover'] === 'number' ? Math.round(f.properties['eo:cloud_cover']) : null,
+    orbit: sensor === 'S1' ? (f.properties['sat:orbit_state'] || null) : null,
+    tile: sensor === 'S2' ? (f.properties['s2:mgrs_tile'] || null)
+        : sensor === 'L8' ? `${f.properties['landsat:wrs_path']}/${f.properties['landsat:wrs_row']}`
+        : null,
+    size: null, // real per-band sizes are fetched at download time (HEAD request), not guessed here
+    bands: [...activeBands],
+    geometry: f.geometry,
+    stacItem: f,
+    totalFound: feats.length
+  }));
+}
+
 // ── MOCK SCENE SEARCH ─────────────────────────────────────────────────────────
+// Fallback only: used for SRTM/CLIMATE (no per-date "scene" concept) or if the
+// real catalog search above fails (network/CORS). Never used for S2/L8/S1
+// when the real lookup succeeds.
 function makeMockScenes() {
   const sensor = activeSensor;
   const start  = new Date(document.getElementById('date-start').value);
@@ -954,51 +1041,74 @@ function kmToDegSpan(wKm, hKm, atLat) {
   return { latSpan, lngSpan };
 }
 
-function drawSceneFootprint(scenes) {
+function drawSceneFootprint(scenes, usedReal) {
   sceneMarkers.clearLayers();
-  if (!scenes.length || !currentAOI) return;
+  const legend = document.getElementById('map-legend');
+  if (!scenes.length || !currentAOI) { legend.style.display = 'none'; return; }
+  legend.style.display = 'block';
+  document.getElementById('legend-real-row').style.display = usedReal ? '' : 'none';
+  document.getElementById('legend-illus-row').style.display = usedReal ? 'none' : '';
 
+  if (usedReal) {
+    // Real per-scene geometry from the STAC catalog. Scenes on the same
+    // tile/path-row usually share (near-)identical geometry, so group them
+    // to avoid stacking duplicate outlines, and list all matching dates in
+    // one popup.
+    const groups = new Map();
+    scenes.forEach((s, i) => {
+      const key = s.tile || s.id;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ ...s, idx: i });
+    });
+
+    groups.forEach((group, key) => {
+      if (!group[0].geometry) return;
+      const layer = L.geoJSON(group[0].geometry, {
+        style: { color: '#8b5cf6', weight: 1.5, fillOpacity: 0.03, dashArray: '6,4' }
+      }).addTo(sceneMarkers);
+      const dateList = group.map(s =>
+        `<a href="javascript:void(0)" onclick="jumpToSceneDownload(${s.idx})" style="color:#00d4a1;text-decoration:underline;">${s.date}${s.cloudCover != null ? ` (${s.cloudCover}% cloud)` : ''}</a>`
+      ).join('<br>');
+      layer.bindPopup(`
+        <b style="color:#8b5cf6;">Real ${SENSORS_LABEL[group[0].sensor]} grid tile — not your AOI</b><br>
+        Tile / Path-Row: <b>${key}</b><br>
+        ${group.length} scene${group.length > 1 ? 's' : ''} — click a date to open its download panel:<br>${dateList}<br>
+        <span style="color:#6b8fa8;font-size:11px;">This is the satellite's fixed global grid cell (~110×110 km for S2), which rarely lines up with your AOI — your actual study area is the small teal box.</span>
+      `);
+    });
+    // Keep the view anchored on the AOI rather than zooming out to fit the
+    // (often much larger) tile footprint — the study area is what matters,
+    // the footprint is context you can pan/zoom to inspect.
+    map.fitBounds(currentAOI.getBounds().pad(0.3));
+    return;
+  }
+
+  // Fallback: no real per-scene geometry available (SRTM/CLIMATE, or the
+  // catalog lookup failed) — draw an ILLUSTRATIVE rectangle sized to the
+  // sensor's typical tile dimensions, clearly labeled as approximate so it's
+  // never mistaken for a real acquired footprint.
   const fp = FOOTPRINT_KM[activeSensor] || FOOTPRINT_KM.S2;
   const aoiBounds = currentAOI.getBounds();
   const center = aoiBounds.getCenter();
-
   const { latSpan, lngSpan } = kmToDegSpan(fp.w, fp.h, center.lat);
-
   const south = center.lat - latSpan / 2;
   const north = center.lat + latSpan / 2;
   const west  = center.lng - lngSpan / 2;
   const east  = center.lng + lngSpan / 2;
 
   const rect = L.rectangle([[south, west], [north, east]], {
-    color: '#00d4a1', weight: 1.5, fillOpacity: 0.04,
-    dashArray: '6,4', interactive: true
+    color: '#ffb020', weight: 1.5, fillOpacity: 0.04, dashArray: '2,6', interactive: true
   }).addTo(sceneMarkers);
 
-  const tileId = scenes[0].tile ? scenes[0].tile : '—';
   rect.bindPopup(`
-    <b>${fp.label}</b><br>
-    Tile / Path-Row: <b>${tileId}</b><br>
-    ${scenes.length} scene${scenes.length > 1 ? 's' : ''} available in date range<br>
-    <span style="color:#6b8fa8;font-size:11px;">Actual footprint size — repeats for every overpass of this tile</span>
+    <b>Illustrative footprint — NOT a real acquisition</b><br>
+    Typical size: ${fp.label}<br>
+    <span style="color:#ffb020;font-size:11px;">Real per-scene geometry isn't available for ${SENSORS_LABEL[activeSensor]} here — this rectangle is only sized to the sensor's typical tile, centered on your AOI.</span>
   `);
-
-  // Small dots along the footprint edge marking each scene's acquisition (same location, real S2/Landsat repeat geometry)
-  scenes.forEach((s, i) => {
-    const t = (i + 0.5) / scenes.length;
-    const lat = north - t * latSpan * 0.06; // cluster near top edge, tiny offset per scene
-    const lng = west + lngSpan * (0.06 + 0.88 * t);
-    L.circleMarker([lat, lng], {
-      radius: 4, color: '#00d4a1', fillColor: '#00d4a1',
-      fillOpacity: 0.6, weight: 1
-    }).bindPopup(`<b>${s.date}</b><br>${SENSORS_LABEL[s.sensor]} · CC: ${s.cloudCover}%<br>Tile: ${s.tile || '—'}`)
-      .addTo(sceneMarkers);
-  });
-
-  // Fit map to show both AOI and footprint
   map.fitBounds(rect.getBounds().pad(0.05));
 }
 
-function searchScenes() {
+async function searchScenes() {
   if (!currentAOI) {
     showToast('⚠ Draw an AOI on the map first', true);
     return;
@@ -1008,16 +1118,43 @@ function searchScenes() {
   btn.innerHTML = '<div class="spin"></div> Searching…';
   btn.disabled = true;
 
-  setTimeout(() => {
-    btn.innerHTML = '<span>🔍</span> Search Scenes';
-    btn.disabled = false;
+  const bbox = currentSearchBbox();
+  const ds = document.getElementById('date-start').value;
+  const de = document.getElementById('date-end').value;
+  const maxCC = document.getElementById('cloud-slider').value;
 
-    const scenes = makeMockScenes();
-    renderScenes(scenes);
-    drawSceneFootprint(scenes);
+  let scenes = [];
+  let usedReal = false;
+  let searchError = null;
 
-    showToast(`Found ${scenes.length} scenes for ${activeSensor}`);
-  }, 900);
+  try {
+    const real = await searchStacScenes(activeSensor, bbox, ds, de, maxCC);
+    if (real) { scenes = real; usedReal = true; }
+  } catch (e) {
+    searchError = e.message;
+  }
+
+  if (!usedReal) {
+    scenes = makeMockScenes(); // SRTM/CLIMATE (no per-scene STAC collection) or a failed catalog lookup
+  }
+
+  btn.innerHTML = '<span>🔍</span> Search Scenes';
+  btn.disabled = false;
+
+  renderScenes(scenes);
+  drawSceneFootprint(scenes, usedReal);
+
+  if (usedReal) {
+    const total = scenes[0] && scenes[0].totalFound;
+    const countMsg = (total && total > scenes.length)
+      ? `Found ${total} real scenes across your date range — showing ${scenes.length} spread evenly across it`
+      : `Found ${scenes.length} real scene${scenes.length===1?'':'s'} for ${activeSensor}`;
+    showToast(countMsg);
+  } else if (searchError) {
+    showToast(`Catalog lookup failed (${searchError}) — showing placeholder scenes; try again`, true);
+  } else {
+    showToast(`${SENSORS_LABEL[activeSensor]} isn't scene-based — showing illustrative dates, not real acquisitions`, true);
+  }
 }
 
 function renderScenes(scenes) {
@@ -1036,13 +1173,13 @@ function renderScenes(scenes) {
   countEl.textContent = `${scenes.length} scene${scenes.length > 1 ? 's' : ''}`;
 
   panel.innerHTML = scenes.map((s, i) => {
-    const ccClass = s.cloudCover < 20 ? 'cloud-low' : s.cloudCover < 60 ? 'cloud-mid' : 'cloud-high';
+    const ccClass = s.cloudCover == null ? '' : s.cloudCover < 20 ? 'cloud-low' : s.cloudCover < 60 ? 'cloud-mid' : 'cloud-high';
     const meta = [
       s.tile   ? ['Tile / Path', s.tile]     : null,
       s.orbit  ? ['Orbit dir.', s.orbit]     : null,
-      ['Est. size', s.size + ' MB'],
+      s.size != null ? ['Est. size', s.size + ' MB'] : ['File size', 'shown after Download (real, per-band)'],
       ['Bands', s.bands.slice(0,4).join(', ') + (s.bands.length > 4 ? ' …' : '')],
-      ['Source', SENSORS[s.sensor].sources[0]]
+      ['Source', s.stacItem ? 'Real scene (Earth Search STAC)' : SENSORS[s.sensor].sources[0]]
     ].filter(Boolean);
 
     return `
@@ -1052,7 +1189,7 @@ function renderScenes(scenes) {
           <div class="scene-date">${s.date}</div>
           <div class="scene-sensor">${SENSORS_LABEL[s.sensor]} &mdash; Scene ${i+1} of ${scenes.length}</div>
         </div>
-        <div class="cloud-badge ${ccClass}">Cloud ${s.cloudCover}%</div>
+        ${SENSORS[s.sensor].hasCloud && s.cloudCover != null ? `<div class="cloud-badge ${ccClass}">Cloud ${s.cloudCover}%</div>` : ''}
         <button class="dl-card-btn" title="Download from AWS S3"
           onclick="event.stopPropagation();downloadScene(${i})">Download</button>
       </div>
@@ -1075,6 +1212,20 @@ function renderScenes(scenes) {
 function toggleScene(i) {
   const body = document.getElementById(`body-${i}`);
   body.classList.toggle('open');
+}
+
+// Clicking a date in a footprint popup jumps to that scene in the results
+// list, expands it, and opens its real download panel directly.
+function jumpToSceneDownload(i) {
+  const card = document.getElementById(`card-${i}`);
+  const body = document.getElementById(`body-${i}`);
+  if (!card || !body) return;
+  map.closePopup();
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (!body.classList.contains('open')) toggleScene(i);
+  card.classList.add('flash-highlight');
+  setTimeout(() => card.classList.remove('flash-highlight'), 1600);
+  downloadScene(i);
 }
 
 // ── AWS S3 URL BUILDERS ────────────────────────────────────────────────────────
@@ -1117,69 +1268,169 @@ const SRTM_FILES = {
   'Hillshade': { url: 'https://s3.amazonaws.com/elevation-tiles-prod/geotiff/', file: 'srtm_nigeria_hillshade.tif', size: '~40 MB' },
 };
 
-function buildS3Links(scene) {
+// ── REAL CATALOG LOOKUP (Element84 Earth Search STAC API) ─────────────────────
+// We no longer guess scene IDs / S3 keys from the mock date. We query the real
+// public STAC catalog for the closest actual acquisition and use the asset
+// hrefs it returns verbatim, so every link points to a file that really exists.
+const STAC_ENDPOINT = 'https://earth-search.aws.element84.com/v1/search';
+
+// UI band label -> real STAC asset key
+const S2_ASSET_KEYS = {
+  'B2 Blue': 'blue', 'B3 Green': 'green', 'B4 Red': 'red',
+  'B5 RE1': 'rededge1', 'B6 RE2': 'rededge2', 'B7 RE3': 'rededge3',
+  'B8 NIR': 'nir', 'B8A RE4': 'nir08',
+  'B11 SWIR1': 'swir16', 'B12 SWIR2': 'swir22', 'SCL': 'scl'
+};
+const L8_ASSET_KEYS = {
+  'B1 Coastal': 'coastal', 'B2 Blue': 'blue', 'B3 Green': 'green', 'B4 Red': 'red',
+  'B5 NIR': 'nir08', 'B6 SWIR1': 'swir16', 'B7 SWIR2': 'swir22',
+  'B10 TIRS1': 'lwir11', 'B11 TIRS2': 'lwir', 'QA_PIXEL': 'qa_pixel'
+};
+
+function currentSearchBbox() {
+  if (typeof currentAOI !== 'undefined' && currentAOI) {
+    const b = currentAOI.getBounds();
+    return [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+  }
+  // Fallback: SE Nigeria default extent used elsewhere in this app
+  return [6.2, 4.8, 9.0, 7.2];
+}
+
+// Search progressively wider date windows around the target date until we
+// find a real acquisition, since satellites don't image every tile every day.
+// Also honors the cloud-cover ceiling the person actually set — if nothing
+// clears it nearby, we say so and fall back rather than silently ignoring it.
+async function findNearestStacItem(collection, bbox, targetDateStr, maxCloud) {
+  const target = new Date(targetDateStr + 'T00:00:00Z');
+  const windowsDays = [15, 45, 120, 365];
+
+  async function search(win, withCloudFilter) {
+    const from = new Date(target.getTime() - win * 86400000).toISOString().slice(0,10);
+    const to   = new Date(target.getTime() + win * 86400000).toISOString().slice(0,10);
+    const body = {
+      collections: [collection],
+      bbox,
+      datetime: `${from}T00:00:00Z/${to}T23:59:59Z`,
+      limit: 30
+    };
+    if (withCloudFilter && maxCloud != null) {
+      body.query = { 'eo:cloud_cover': { lte: Number(maxCloud) } };
+    }
+    let resp;
+    try {
+      resp = await fetch(STAC_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    } catch (e) {
+      throw new Error('Could not reach the Earth Search catalog (network/CORS error).');
+    }
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return data.features || [];
+  }
+
+  function closest(feats) {
+    feats.sort((a, b) =>
+      Math.abs(new Date(a.properties.datetime) - target) -
+      Math.abs(new Date(b.properties.datetime) - target)
+    );
+    return feats[0];
+  }
+
+  // Pass 1: respect the cloud-cover ceiling
+  if (maxCloud != null) {
+    for (const win of windowsDays) {
+      const feats = await search(win, true);
+      if (feats.length) return { item: closest(feats), cloudRelaxed: false };
+    }
+  }
+  // Pass 2: no scene cleared the ceiling nearby — widen without the cloud
+  // filter so we can at least return something real, and flag that it happened.
+  for (const win of windowsDays) {
+    const feats = await search(win, false);
+    if (feats.length) return { item: closest(feats), cloudRelaxed: maxCloud != null };
+  }
+  return { item: null, cloudRelaxed: false };
+}
+
+function formatBytes(bytes) {
+  if (!bytes || isNaN(bytes)) return null;
+  if (bytes >= 1e9) return (bytes / 1e9).toFixed(2) + ' GB';
+  if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + ' MB';
+  if (bytes >= 1e3) return (bytes / 1e3).toFixed(0) + ' KB';
+  return bytes + ' B';
+}
+
+// Get the REAL file size via a HEAD request instead of a guessed number —
+// per-band size varies a lot with compression/scene content, so a static
+// table (like the old ~95MB estimate) doesn't match what actually downloads.
+async function fetchRealSize(url) {
+  try {
+    const resp = await fetch(url, { method: 'HEAD' });
+    if (!resp.ok) return null;
+    return formatBytes(parseInt(resp.headers.get('content-length'), 10));
+  } catch (e) {
+    return null; // CORS/network hiccup — caller falls back to an honest placeholder
+  }
+}
+
+async function linksFromStacItem(item, sensor, requestedBands) {
+  const keyMap = sensor === 'S2' ? S2_ASSET_KEYS : L8_ASSET_KEYS;
+  const links = [];
+  const missing = [];
+  requestedBands.forEach(b => {
+    const key = keyMap[b];
+    const asset = key && item.assets[key];
+    if (asset && asset.href) {
+      const file = asset.href.split('/').pop();
+      links.push({ label: b, url: asset.href, s3: asset.href, file, size: null, icon: sensor === 'S2' ? '🟩' : '🟦' });
+    } else {
+      missing.push(b);
+    }
+  });
+  // Fetch real sizes in parallel rather than one guessed number per band
+  await Promise.all(links.map(async l => {
+    l.size = (await fetchRealSize(l.url)) || 'size unknown — see "Open ↗"';
+  }));
+  // Always include the real STAC item metadata link
+  const selfLink = (item.links || []).find(l => l.rel === 'self');
+  links.push({
+    label: 'STAC item metadata (JSON)',
+    url: selfLink ? selfLink.href : `${STAC_ENDPOINT.replace('/search','')}/collections/${item.collection}/items/${item.id}`,
+    s3: selfLink ? selfLink.href : '',
+    file: `${item.id}.json`, size: '< 5 KB', icon: '📄'
+  });
+  return { links, missing };
+}
+
+async function buildS3Links(scene) {
   const links = [];
 
-  if (scene.sensor === 'S2') {
-    // Parse tile e.g. "32NNM" → zone=32, latBand=N, gridSq=NM
-    const tile = scene.tile || '32NNM';
-    const zone = tile.slice(0,2);
-    const latB = tile[2];
-    const grid = tile.slice(3);
-    const [y, m, d] = scene.date.split('-');
-    const mo = parseInt(m);
-    // Scene ID format used by Element84 COG archive
-    const sceneId = `S2A_${tile}_${y}${m}${d}_0_L2A`;
-    const base = `https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs/${zone}/${latB}/${grid}/${y}/${mo}/${sceneId}`;
+  if (scene.sensor === 'S2' || scene.sensor === 'L8') {
+    const collection = scene.sensor === 'S2' ? 'sentinel-2-l2a' : 'landsat-c2-l2';
+    let item = scene.stacItem || null;
+    let cloudRelaxed = false;
+    let maxCloud = document.getElementById('cloud-slider') ? document.getElementById('cloud-slider').value : null;
 
-    scene.bands.forEach(b => {
-      const bf = S2_BAND_FILES[b];
-      if (bf) links.push({
-        label: b,
-        url:   `${base}/${bf.file}`,
-        s3:    `s3://sentinel-cogs/sentinel-s2-l2a-cogs/${zone}/${latB}/${grid}/${y}/${mo}/${sceneId}/${bf.file}`,
-        file:  bf.file,
-        size:  bf.size,
-        icon:  '🟩'
-      });
-    });
-    // Always add TileInfo JSON
-    links.push({
-      label: 'tileInfo.json',
-      url:   `${base}/tileInfo.json`,
-      s3:    `s3://sentinel-cogs/sentinel-s2-l2a-cogs/${zone}/${latB}/${grid}/${y}/${mo}/${sceneId}/tileInfo.json`,
-      file:  'tileInfo.json', size: '< 1 KB', icon: '📄'
-    });
-
-  } else if (scene.sensor === 'L8') {
-    const [pathStr, rowStr] = (scene.tile || '189/055').split('/');
-    const path = pathStr.padStart(3,'0');
-    const row  = rowStr.padStart(3,'0');
-    const [y]  = scene.date.split('-');
-    const sceneId = `LC08_L2SP_${path}${row}_${scene.date.replace(/-/g,'')}_20230101_02_T1`;
-    const base = `https://landsatonaws.com/L8/${path}/${row}/${sceneId}`;
-    const s3base = `s3://usgs-landsat/collection02/level-2/standard/oli-tirs/${y}/${path}/${row}/${sceneId}`;
-
-    scene.bands.forEach(b => {
-      const bf = L8_BAND_FILES[b];
-      if (bf) links.push({
-        label: b,
-        url:   `https://landsatonaws.com/L8/${path}/${row}/${sceneId}`,
-        s3:    `${s3base}/${sceneId}${bf.file}`,
-        file:  `${sceneId}${bf.file}`,
-        size:  bf.size,
-        icon:  '🟦'
-      });
-    });
-    links.push({
-      label: 'MTL.txt (metadata)',
-      url:   `${base}`,
-      s3:    `${s3base}/${sceneId}_MTL.txt`,
-      file:  `${sceneId}_MTL.txt`, size: '~10 KB', icon: '📄'
-    });
+    if (!item) {
+      // Scene came from the mock fallback (catalog search failed earlier) —
+      // do the nearest-match lookup now instead.
+      const bbox = currentSearchBbox();
+      const result = await findNearestStacItem(collection, bbox, scene.date, maxCloud);
+      item = result.item;
+      cloudRelaxed = result.cloudRelaxed;
+    }
+    if (!item) {
+      return { links: [], realItem: null, notFound: true };
+    }
+    const { links: builtLinks, missing } = await linksFromStacItem(item, scene.sensor, scene.bands);
+    return { links: builtLinks, realItem: item, missing, cloudRelaxed, maxCloud };
 
   } else if (scene.sensor === 'S1') {
-    // Sentinel-1 on Copernicus / ASF (not on AWS Open Data free tier for SAR)
+    // Sentinel-1 SAR is not in the sentinel-2/landsat COG buckets; point to the
+    // real ASF DAAC search UI rather than fabricating a direct file link.
     links.push({
       label: 'Note',
       url:   'https://search.asf.alaska.edu/',
@@ -1187,36 +1438,164 @@ function buildS3Links(scene) {
       file:  '— SAR via ASF DAAC (free account required)',
       size:  '~800 MB/scene', icon: '📡'
     });
+    return { links, realItem: null };
 
   } else if (scene.sensor === 'SRTM') {
-    scene.bands.forEach(b => {
-      const sf = SRTM_FILES[b];
-      if (sf) links.push({
-        label: b,
-        url:   'https://portal.opentopography.org/raster?opentopoID=OMSRTM.042013.4326.1',
-        s3:    `s3://raster/AWSElevation/ELEV/World_10m/srtm/${sf.file}`,
-        file:  sf.file, size: sf.size, icon: '⛰'
+    // "Elevation" is a real downloadable file (Copernicus DEM GLO-30 COG on AWS,
+    // via the same STAC catalog used above). Slope/Aspect/Hillshade are NOT
+    // files anywhere — they're computed from the DEM — so we're honest about
+    // that instead of pointing at a fake S3 key.
+    const bbox = currentSearchBbox();
+    const wantsElevation = scene.bands.includes('Elevation');
+    const derived = scene.bands.filter(b => b !== 'Elevation');
+
+    if (wantsElevation) {
+      let resp, item = null;
+      try {
+        resp = await fetch(STAC_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ collections: ['cop-dem-glo-30'], bbox, limit: 4 })
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          item = (data.features || [])[0] || null;
+        }
+      } catch (e) { /* handled below */ }
+
+      if (item) {
+        const rasterAsset = item.assets.data || Object.values(item.assets).find(a => (a.type||'').includes('tiff'));
+        if (rasterAsset) {
+          links.push({
+            label: 'Elevation (Copernicus DEM GLO-30)',
+            url: rasterAsset.href, s3: rasterAsset.href,
+            file: rasterAsset.href.split('/').pop(),
+            size: 'COG · ~30m', icon: '⛰'
+          });
+        }
+      } else {
+        links.push({
+          label: 'Elevation — lookup failed',
+          url: 'https://portal.opentopography.org/dataCatalog',
+          s3: '', file: '— could not find a DEM tile for this AOI; browse OpenTopography\'s catalog directly',
+          size: '', icon: '⛰'
+        });
+      }
+    }
+    derived.forEach(b => {
+      links.push({
+        label: `${b} (computed, not a file)`,
+        url: '', s3: '',
+        file: `— ${b} isn't a stored file anywhere; it's derived from the DEM. Use the "GEE Script" tab, which already computes this with ee.Terrain.${b.toLowerCase()}().`,
+        size: '', icon: '🧮'
       });
     });
+    return { links, realItem: null };
+
+  } else if (scene.sensor === 'CLIMATE') {
+    // CHIRPS actually does publish standalone daily global GeoTIFFs over plain
+    // HTTPS (no auth, no GEE needed) — build a real link for it. TerraClimate
+    // and MODIS LST don't have an equivalent standalone per-AOI file; those
+    // stay honestly routed to the GEE Script tab instead of a fake link.
+    const [y, m, d] = scene.date.split('-');
+    const wantsChirps = scene.bands.includes('Precipitation (CHIRPS)');
+    const geeOnlyBands = scene.bands.filter(b => b !== 'Precipitation (CHIRPS)');
+
+    if (wantsChirps) {
+      const chirpsUrl = `https://data.chc.ucsb.edu/products/CHIRPS-2.0/global_daily/tifs/p05/${y}/chirps-v2.0.${y}.${m}.${d}.tif.gz`;
+      links.push({
+        label: 'Precipitation (CHIRPS, global — unclipped)',
+        url: chirpsUrl, s3: chirpsUrl,
+        file: `chirps-v2.0.${y}.${m}.${d}.tif.gz`,
+        size: 'unverified — CHC\'s server usually blocks in-browser checks; open the link or wget it (works fine outside the browser)',
+        icon: '🌧'
+      });
+    }
+    geeOnlyBands.forEach(b => {
+      links.push({
+        label: `${b} — no standalone file`,
+        url: '', s3: '',
+        file: `— ${b} isn't published as a simple downloadable file; pull it for your AOI/date range from the "GEE Script" tab instead.`,
+        size: '', icon: 'ℹ'
+      });
+    });
+    if (!links.length) {
+      links.push({
+        label: 'No climate bands selected',
+        url: '', s3: '',
+        file: '— tick at least one climate variable in the sidebar first.',
+        size: '', icon: 'ℹ'
+      });
+    }
+    return { links, realItem: null };
   }
-  return links;
+  return { links, realItem: null };
 }
 
 // current modal scene
 let _modalScene = null;
 let _modalLinks = [];
 
-function downloadScene(sceneIdx) {
+async function downloadScene(sceneIdx) {
   const card = document.getElementById(`card-${sceneIdx}`);
   _modalScene = card._scene;
-  _modalLinks = buildS3Links(_modalScene);
-  openS3Modal(_modalScene, _modalLinks);
+  openS3ModalLoading(_modalScene);
+  try {
+    const result = await buildS3Links(_modalScene);
+    _modalLinks = result.links;
+    if (result.notFound) {
+      showS3ModalMessage(_modalScene,
+        `No real ${_modalScene.sensor === 'S2' ? 'Sentinel-2' : 'Landsat'} acquisition was found in the AWS catalog near ${_modalScene.date} for the current AOI. Try drawing a different AOI or widening the date range.`);
+      return;
+    }
+    openS3Modal(_modalScene, _modalLinks, result.realItem, result.missing, result.cloudRelaxed, result.maxCloud);
+  } catch (err) {
+    showS3ModalMessage(_modalScene, `Catalog lookup failed: ${err.message}`);
+  }
 }
 
-function openS3Modal(scene, links) {
+function openS3ModalLoading(scene) {
+  document.getElementById('s3-modal-overlay').classList.add('open');
   document.getElementById('modal-title').textContent = `↓ ${scene.sensor} · ${scene.date}`;
-  document.getElementById('modal-sub').textContent =
-    `${links.length} files · Cloud cover ${scene.cloudCover}% · Scene ${scene.id}`;
+  document.getElementById('modal-sub').textContent = 'Searching the real AWS/STAC catalog for the nearest matching scene…';
+  document.getElementById('s3-file-list').innerHTML =
+    '<div style="color:var(--muted);font-size:12px;">Looking up real acquisitions…</div>';
+  document.getElementById('wget-box').innerHTML = '';
+}
+
+function showS3ModalMessage(scene, msg) {
+  document.getElementById('s3-modal-overlay').classList.add('open');
+  document.getElementById('modal-title').textContent = `↓ ${scene.sensor} · ${scene.date}`;
+  document.getElementById('modal-sub').textContent = 'No files available';
+  document.getElementById('s3-file-list').innerHTML =
+    `<div style="color:var(--danger);font-size:12px;">${msg}</div>`;
+  document.getElementById('wget-box').innerHTML = '';
+}
+
+function openS3Modal(scene, links, realItem, missing, cloudRelaxed, maxCloud) {
+  document.getElementById('modal-title').textContent = `↓ ${scene.sensor} · ${scene.date}`;
+  let sub = `${links.length} files` + (SENSORS[scene.sensor].hasCloud ? ` · Cloud cover ${scene.cloudCover}%` : '') + ` · Scene ${scene.id}`;
+  if (realItem) {
+    const realDate = realItem.properties.datetime.slice(0,10);
+    const realCloud = realItem.properties['eo:cloud_cover'];
+    sub = `${links.length} files · Nearest real acquisition: ${realItem.id} (${realDate})`;
+    if (realDate !== scene.date) {
+      sub += ` — no scene existed on ${scene.date}, so this is the closest match`;
+    }
+    if (typeof realCloud === 'number') {
+      sub += ` · Actual cloud cover: ${realCloud.toFixed(0)}%`;
+    }
+  }
+  document.getElementById('modal-sub').textContent = sub;
+  document.getElementById('modal-sub').style.color = cloudRelaxed ? 'var(--danger, #ff6b6b)' : '';
+
+  if (cloudRelaxed && realItem) {
+    const realCloud = realItem.properties['eo:cloud_cover'];
+    showToast(`No scene under ${maxCloud}% cloud cover was found nearby — showing the closest real acquisition instead, which is ${typeof realCloud==='number' ? realCloud.toFixed(0) : '?'}% cloud.`, true);
+  }
+  if (missing && missing.length) {
+    showToast(`${missing.length} of your selected bands weren't available on this scene: ${missing.join(', ')}`);
+  }
 
   // ── FILES TAB ──
   const fileList = document.getElementById('s3-file-list');
@@ -1225,20 +1604,25 @@ function openS3Modal(scene, links) {
   } else {
     const groups = {};
     links.forEach(l => {
-      const g = l.icon === '📄' ? 'Metadata' : 'Band files';
+      const g = l.icon === '📄' ? 'Metadata' : (l.icon === '🧮' || l.icon === 'ℹ') ? 'Notes' : 'Band files';
       if (!groups[g]) groups[g] = [];
       groups[g].push(l);
     });
     fileList.innerHTML = Object.entries(groups).map(([grp, items]) => `
       <div class="s3-group">
         <div class="s3-group-title">${grp}</div>
-        ${items.map(l => `
+        ${items.map(l => l.url ? `
           <div class="s3-link-row">
             <span class="s3-icon">${l.icon}</span>
             <span class="s3-path" title="${l.s3}">${l.s3}</span>
             <span class="s3-size">${l.size}</span>
             <button class="s3-copy-btn" onclick="copyText('${l.s3.replace(/'/g,"\\'")}', this)">Copy</button>
             <a class="s3-open-btn" href="${l.url}" target="_blank" rel="noopener">Open ↗</a>
+          </div>
+        ` : `
+          <div class="s3-link-row">
+            <span class="s3-icon">${l.icon}</span>
+            <span class="s3-path" style="color:var(--muted);">${l.file}</span>
           </div>
         `).join('')}
       </div>
@@ -1259,7 +1643,7 @@ function openS3Modal(scene, links) {
 
   // ── GDAL TAB ──
   document.getElementById('gdal-box').innerHTML = links
-    .filter(l => l.icon !== '📄')
+    .filter(l => l.icon !== '📄' && l.url)
     .map(l => `<span class="cmd-kw">gdalinfo</span> <span class="cmd-url">"/vsicurl/${l.url}"</span>\n` +
                `<span class="cmd-kw">gdal_translate</span> <span class="cmd-url">"/vsicurl/${l.url}"</span> "${l.file}"`)
     .join('\n\n');
@@ -1304,16 +1688,23 @@ function copyGdal() {
 
 function downloadManifest() {
   if (!_modalLinks.length) return;
+  const real = _modalLinks.filter(l => l.url);
+  const notes = _modalLinks.filter(l => !l.url);
   const lines = [
     `# EO Data Explorer — Ecosynthra Lab`,
     `# Scene: ${_modalScene.id}  Date: ${_modalScene.date}  Sensor: ${_modalScene.sensor}`,
     `# Generated: ${new Date().toISOString()}`,
     ``,
-    `## S3 paths (use: aws s3 cp <path> .)`,
-    ..._modalLinks.map(l => l.s3),
+    real.length ? `## S3 paths (use: aws s3 cp <path> .)` : `## S3 paths — none (see Notes below)`,
+    ...real.map(l => l.s3 || l.url),
     ``,
-    `## HTTPS download URLs`,
-    ..._modalLinks.map(l => l.url),
+    real.length ? `## HTTPS download URLs` : `## HTTPS download URLs — none (see Notes below)`,
+    ...real.map(l => l.url),
+    ...(notes.length ? [
+      ``,
+      `## Notes`,
+      ...notes.map(l => `# ${l.label}: ${l.file}`)
+    ] : [])
   ].join('\n');
   const blob = new Blob([lines], { type: 'text/plain' });
   const a = document.createElement('a');
@@ -1580,6 +1971,38 @@ const L8_GEE_BANDS = {
 };
 const S1_GEE_BANDS = { 'VV':'VV','VH':'VH' };
 
+// Verified against the Earth Engine Data Catalog (units/scale factors as documented there)
+const CLIMATE_VARS = {
+  'Precipitation (CHIRPS)': {
+    collection: 'UCSB-CHG/CHIRPS/DAILY', band: 'precipitation', reducer: 'sum',
+    scale: 5566, unit: 'mm', vis: { min: 0, max: 300, palette: ['f7fbff','6baed6','08306b'] }
+  },
+  'Max Temp (TerraClimate)': {
+    collection: 'IDAHO_EPSCOR/TERRACLIMATE', band: 'tmmx', reducer: 'mean',
+    scaleFactor: 0.1, scale: 4638.3, unit: '°C', vis: { min: 15, max: 45, palette: ['2c7bb6','ffffbf','d7191c'] }
+  },
+  'Min Temp (TerraClimate)': {
+    collection: 'IDAHO_EPSCOR/TERRACLIMATE', band: 'tmmn', reducer: 'mean',
+    scaleFactor: 0.1, scale: 4638.3, unit: '°C', vis: { min: 10, max: 30, palette: ['2c7bb6','ffffbf','d7191c'] }
+  },
+  'Soil Moisture (TerraClimate)': {
+    collection: 'IDAHO_EPSCOR/TERRACLIMATE', band: 'soil', reducer: 'mean',
+    scaleFactor: 0.1, scale: 4638.3, unit: 'mm', vis: { min: 0, max: 300, palette: ['8c510a','f6e8c3','01665e'] }
+  },
+  'Actual ET (TerraClimate)': {
+    collection: 'IDAHO_EPSCOR/TERRACLIMATE', band: 'aet', reducer: 'sum',
+    scaleFactor: 0.1, scale: 4638.3, unit: 'mm', vis: { min: 0, max: 150, palette: ['ffffcc','78c679','006837'] }
+  },
+  'LST Day (MODIS)': {
+    collection: 'MODIS/061/MOD11A2', band: 'LST_Day_1km', reducer: 'mean',
+    scaleFactor: 0.02, offset: -273.15, scale: 1000, unit: '°C', vis: { min: 20, max: 45, palette: ['313695','fee090','a50026'] }
+  },
+  'LST Night (MODIS)': {
+    collection: 'MODIS/061/MOD11A2', band: 'LST_Night_1km', reducer: 'mean',
+    scaleFactor: 0.02, offset: -273.15, scale: 1000, unit: '°C', vis: { min: 10, max: 30, palette: ['313695','fee090','a50026'] }
+  }
+};
+
 function resolveGeeBands() {
   const map = activeSensor === 'S2' ? S2_GEE_BANDS
             : activeSensor === 'L8' ? L8_GEE_BANDS
@@ -1640,17 +2063,66 @@ function generateGEE() {
   // AOI
   script += `var aoi = ${aoiStr};\nMap.centerObject(aoi, 10);\n\n`;
 
+  if (geeOutputType === 'export_csv' && activeSensor !== 'CLIMATE') {
+    script += `// NOTE: CSV/table export is currently only wired up for the Climate\n// sensor in this tool. Switch "Output type" to Export to Drive, Export to\n// Asset, or Time Series Chart for ${activeSensor}, or use ee.Reducer.mean()\n// + Export.table.toDrive() manually below.\n\n`;
+  }
+
+
   if (isSRTM) {
     script += `// ── SRTM Elevation ──────────────────────────────────\n`;
     script += `var dem = ee.Image('${col.id}').clip(aoi);\n`;
-    script += `var slope  = ee.Terrain.slope(dem);\n`;
-    script += `var aspect = ee.Terrain.aspect(dem);\n\n`;
-    script += `Map.addLayer(dem,    {min:0,   max:600, palette:['#0d0221','#5f0f40','#9a031e','#fb8b24','#e36414','#fff']}, 'Elevation');\n`;
-    script += `Map.addLayer(slope,  {min:0,   max:45,  palette:['#fff','#fdae61','#d73027']}, 'Slope (deg)');\n`;
-    script += `Map.addLayer(aspect, {min:0,   max:360, palette:['#d73027','#fee090','#4575b4','#d73027']}, 'Aspect');\n`;
+    script += `var slope     = ee.Terrain.slope(dem);\n`;
+    script += `var aspect    = ee.Terrain.aspect(dem);\n`;
+    script += `var hillshade = ee.Terrain.hillshade(dem);\n\n`;
+    script += `Map.addLayer(dem,       {min:0,   max:600, palette:['#0d0221','#5f0f40','#9a031e','#fb8b24','#e36414','#fff']}, 'Elevation');\n`;
+    script += `Map.addLayer(slope,     {min:0,   max:45,  palette:['#fff','#fdae61','#d73027']}, 'Slope (deg)');\n`;
+    script += `Map.addLayer(aspect,    {min:0,   max:360, palette:['#d73027','#fee090','#4575b4','#d73027']}, 'Aspect');\n`;
+    script += `Map.addLayer(hillshade, {min:0,   max:255}, 'Hillshade');\n`;
     if (geeOutputType === 'export_drive') {
       script += `\n// Export elevation to Google Drive\nExport.image.toDrive({\n  image: dem,\n  description: 'SRTM_elevation_SE_Nigeria',\n  folder: 'EO_Explorer',\n  region: aoi,\n  scale: 30,\n  maxPixels: 1e9\n});\n`;
     }
+    script += `\nMap.addLayer(ee.Image().paint(aoi, 0, 2), {palette:'#00d4a1'}, 'AOI boundary');\n`;
+
+  } else if (activeSensor === 'CLIMATE') {
+    const selected = [...activeBands].filter(b => CLIMATE_VARS[b]);
+    script += `// ── Climate variables (CHIRPS / TerraClimate / MODIS) ──\n`;
+    script += `// Each variable lives in its own Earth Engine collection, so we\n`;
+    script += `// pull and reduce them separately over your date range and AOI.\n\n`;
+    if (!selected.length) {
+      script += `// No climate variables selected — tick at least one band in the sidebar.\n`;
+    }
+    selected.forEach((label, i) => {
+      const v = CLIMATE_VARS[label];
+      const varName = `clim${i}`;
+      script += `// ${label}\n`;
+      script += `var ${varName}_col = ee.ImageCollection('${v.collection}')\n`;
+      script += `  .filterBounds(aoi)\n`;
+      script += `  .filterDate('${ds}', '${de}')\n`;
+      script += `  .select('${v.band}');\n`;
+      script += `var ${varName} = ${varName}_col.${v.reducer}()${v.scaleFactor ? `.multiply(${v.scaleFactor})` : ''}${v.offset ? `.add(${v.offset})` : ''}.clip(aoi);\n`;
+      script += `Map.addLayer(${varName}, {min:${v.vis.min}, max:${v.vis.max}, palette:${JSON.stringify(v.vis.palette)}}, '${label}');\n`;
+      if (geeOutputType === 'export_drive') {
+        script += `Export.image.toDrive({\n  image: ${varName},\n  description: 'CLIMATE_${v.band}_SE_Nigeria',\n  folder: 'EO_Explorer',\n  region: aoi,\n  scale: ${v.scale},\n  maxPixels: 1e9\n});\n`;
+      } else if (geeOutputType === 'timeseries') {
+        script += `var ${varName}_chart = ui.Chart.image.series({\n  imageCollection: ${varName}_col${v.scaleFactor ? `.map(function(img){return img.multiply(${v.scaleFactor})${v.offset ? `.add(${v.offset})` : ''}.copyProperties(img,['system:time_start']);})` : ''},\n  region: aoi,\n  reducer: ee.Reducer.mean(),\n  scale: ${v.scale}\n}).setOptions({title: '${label} — SE Nigeria', vAxis: {title: '${v.unit}'}, hAxis: {title: 'Date'}});\nprint(${varName}_chart);\n`;
+      } else if (geeOutputType === 'export_csv') {
+        script += `// One row per image date: AOI-mean value in ${v.unit}\n`;
+        script += `var ${varName}_ts = ${varName}_col.map(function(img) {\n`;
+        script += `  var scaled = img.select('${v.band}')${v.scaleFactor ? `.multiply(${v.scaleFactor})` : ''}${v.offset ? `.add(${v.offset})` : ''};\n`;
+        script += `  var stat = scaled.reduceRegion({\n    reducer: ee.Reducer.mean(),\n    geometry: aoi,\n    scale: ${v.scale},\n    maxPixels: 1e9\n  });\n`;
+        script += `  return ee.Feature(null, {\n    date: img.date().format('YYYY-MM-dd'),\n    ${v.band}_mean: stat.get('${v.band}')\n  });\n`;
+        script += `});\n`;
+        script += `Export.table.toDrive({\n  collection: ${varName}_ts,\n  description: 'CLIMATE_${v.band}_timeseries_SE_Nigeria',\n  folder: 'EO_Explorer',\n  fileFormat: 'CSV'\n});\n`;
+        script += `print('${label} — rows queued for CSV export:', ${varName}_ts.size());\n`;
+      }
+      script += `\n`;
+    });
+    if (geeOutputType === 'export_csv' && selected.length) {
+      script += `// Each variable above queues its own CSV — run the script, then open the\n`;
+      script += `// "Tasks" tab in the Code Editor and click "Run" next to each export.\n\n`;
+    }
+    script += `Map.addLayer(ee.Image().paint(aoi, 0, 2), {palette:'#00d4a1'}, 'AOI boundary');\n`;
+
   } else if (activeSensor === 'S1') {
     script += `// ── Sentinel-1 SAR ──────────────────────────────────\n`;
     script += `var s1 = ee.ImageCollection('${col.id}')\n`;
@@ -1665,6 +2137,7 @@ function generateGEE() {
     if (geeOutputType === 'export_drive') {
       script += `\nExport.image.toDrive({\n  image: composite,\n  description: 'S1_SAR_composite',\n  folder: 'EO_Explorer',\n  region: aoi, scale: 10, maxPixels: 1e9\n});\n`;
     }
+    script += `\nMap.addLayer(ee.Image().paint(aoi, 0, 2), {palette:'#00d4a1'}, 'AOI boundary');\nprint('Scene count:', ee.ImageCollection('${col.id}').filterBounds(aoi).filterDate('${ds}', '${de}').size());\n`;
   } else {
     // S2 or L8
     const scaleFactor = activeSensor === 'L8' ? `\n  // Apply L8 scale factors\n  var opticalBands = img.select('SR_B.').multiply(0.0000275).add(-0.2);\n  img = img.addBands(opticalBands, null, true);\n  return img;` : `  return img;`;
@@ -1722,9 +2195,8 @@ function generateGEE() {
       script += `\n// ── Time Series Chart ────────────────────────────────\n`;
       script += `var chart = ui.Chart.image.series({\n  imageCollection: processed.select('${tsband}'),\n  region: aoi,\n  reducer: ee.Reducer.mean(),\n  scale: ${activeSensor==='S2'?20:30}\n}).setOptions({\n  title: '${tsband} Time Series — SE Nigeria',\n  vAxis: {title: '${tsband}'},\n  hAxis: {title: 'Date'}\n});\nprint(chart);\n`;
     }
+    script += `\nMap.addLayer(ee.Image().paint(aoi, 0, 2), {palette:'#00d4a1'}, 'AOI boundary');\nprint('Scene count:', col.size());\n`;
   }
-
-  script += `\nMap.addLayer(ee.Image().paint(aoi, 0, 2), {palette:'#00d4a1'}, 'AOI boundary');\nprint('Scene count:', col.size());\n`;
 
   // Syntax highlight
   const highlighted = script
