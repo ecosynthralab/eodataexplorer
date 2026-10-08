@@ -554,6 +554,11 @@
               <div class="s-res">30 m</div>
               <div class="s-tag">OLI · Optical</div>
             </div>
+            <div class="sensor-card" data-sensor="LHS" onclick="selectSensor(this)">
+              <div class="s-name">Historical Landsat 1980–</div>
+              <div class="s-res">1–5, 7 &amp; 8/9</div>
+              <div class="s-tag">Teaching archive · real records only</div>
+            </div>
             <div class="sensor-card" data-sensor="SRTM" onclick="selectSensor(this)">
               <div class="s-name">SRTM DEM</div>
               <div class="s-res">30 m</div>
@@ -573,12 +578,15 @@
           <div class="row2">
             <div class="field">
               <label>Start</label>
-              <input type="date" id="date-start" value="2024-01-01">
+              <input type="date" id="date-start" value="2024-01-01" min="1980-01-01">
             </div>
             <div class="field">
               <label>End</label>
-              <input type="date" id="date-end" value="2024-12-31">
+              <input type="date" id="date-end" value="2024-12-31" min="1980-01-01">
             </div>
+          </div>
+          <div id="archive-teaching-note" style="display:none;margin-top:10px;padding:8px 10px;border:1px solid rgba(245,158,11,.35);border-radius:5px;background:rgba(245,158,11,.08);font-size:10px;line-height:1.5;color:var(--accent2);">
+            Historical Landsat archive (1980–): mission and instrument metadata are shown so students can compare how products changed over time.
           </div>
           <div class="field">
             <label>Cloud cover ≤ <span id="cloud-label">30%</span></label>
@@ -874,6 +882,14 @@ const SENSORS = {
     hasDates: true, hasCloud: true,
     sources: ['USGS EarthExplorer', 'Google Earth Engine', 'AWS Open Data']
   },
+  LHS: {
+    bands: ['MSS','TM','ETM','OLI','TIRS','Landsat product metadata'],
+    formats: ['GeoTIFF','COG','Legacy archive formats'],
+    hasDates: true, hasCloud: true,
+    sources: ['USGS EarthExplorer', 'USGS historical archive', 'AWS Open Data'],
+    archive: true,
+    earliestDate: '1980-01-01'
+  },
   SRTM: {
     bands: ['Elevation','Slope','Aspect','Hillshade'],
     formats: ['GeoTIFF','HGT'],
@@ -892,7 +908,10 @@ const SENSORS = {
 let activeSensor = 'S2';
 let activeBands  = new Set(['B2 Blue','B3 Green','B4 Red','B8 NIR','B8A RE4','B11 SWIR1']);
 
-const SENSORS_LABEL = { S2: 'Sentinel-2', S1: 'Sentinel-1', L8: 'Landsat 8/9', SRTM: 'SRTM DEM', CLIMATE: 'Climate' };
+const SENSORS_LABEL = {
+  S2: 'Sentinel-2', S1: 'Sentinel-1', L8: 'Landsat 8/9',
+  LHS: 'Historical Landsat archive', SRTM: 'SRTM DEM', CLIMATE: 'Climate'
+};
 
 function selectSensor(el) {
   document.querySelectorAll('.sensor-card').forEach(c => c.classList.remove('active'));
@@ -901,6 +920,13 @@ function selectSensor(el) {
   const cfg = SENSORS[activeSensor];
   // toggle date/cloud sections
   document.getElementById('date-section').style.display = cfg.hasDates ? '' : 'none';
+  document.getElementById('archive-teaching-note').style.display = activeSensor === 'LHS' ? 'block' : 'none';
+  const start = document.getElementById('date-start');
+  const end = document.getElementById('date-end');
+  start.min = cfg.earliestDate || '1980-01-01';
+  end.min = cfg.earliestDate || '1980-01-01';
+  if (start.value < start.min) start.value = start.min;
+  if (end.value < end.min) end.value = end.min;
   // reset bands
   activeBands = new Set(cfg.bands.slice(0, 4));
   renderBands();
@@ -931,7 +957,16 @@ function updateCloud(input) {
 // Fetch a real LIST of scenes (not just the closest one) for the search
 // results panel, so dates, cloud cover, and footprints shown before you even
 // click Download are genuine — not the Math.random() placeholders below.
-const STAC_SCENE_COLLECTIONS = { S2: 'sentinel-2-l2a', L8: 'landsat-c2-l2', S1: 'sentinel-1-grd' };
+const STAC_SCENE_COLLECTIONS = {
+  S2: 'sentinel-2-l2a',
+  L8: 'landsat-c2-l2',
+  LHS: 'landsat-c2-l1',
+  S1: 'sentinel-1-grd'
+};
+const LANDSAT_ARCHIVE_COLLECTIONS = {
+  'landsat-c2-l1': 'Landsat Collection 1 / legacy archive',
+  'landsat-c2-l2': 'Landsat Collection 2 L2'
+};
 
 async function searchStacScenes(sensor, bbox, dateStartStr, dateEndStr, maxCloud) {
   const collection = STAC_SCENE_COLLECTIONS[sensor];
@@ -980,8 +1015,11 @@ async function searchStacScenes(sensor, bbox, dateStartStr, dateEndStr, maxCloud
     cloudCover: typeof f.properties['eo:cloud_cover'] === 'number' ? Math.round(f.properties['eo:cloud_cover']) : null,
     orbit: sensor === 'S1' ? (f.properties['sat:orbit_state'] || null) : null,
     tile: sensor === 'S2' ? (f.properties['s2:mgrs_tile'] || null)
-        : sensor === 'L8' ? `${f.properties['landsat:wrs_path']}/${f.properties['landsat:wrs_row']}`
+        : sensor === 'L8' || sensor === 'LHS' ? `${f.properties['landsat:wrs_path']}/${f.properties['landsat:wrs_row']}`
         : null,
+    mission: sensor === 'LHS' ? 'Historical Landsat archive' : sensor,
+    archiveCollection: LANDSAT_ARCHIVE_COLLECTIONS[collection] || collection,
+    archiveProduct: f.id,
     size: null, // real per-band sizes are fetched at download time (HEAD request), not guessed here
     bands: [...activeBands],
     geometry: f.geometry,
@@ -1134,7 +1172,7 @@ async function searchScenes() {
     searchError = e.message;
   }
 
-  if (!usedReal) {
+  if (!usedReal && activeSensor !== 'LHS') {
     scenes = makeMockScenes(); // SRTM/CLIMATE (no per-scene STAC collection) or a failed catalog lookup
   }
 
@@ -1144,7 +1182,9 @@ async function searchScenes() {
   renderScenes(scenes);
   drawSceneFootprint(scenes, usedReal);
 
-  if (usedReal) {
+  if (activeSensor === 'LHS' && searchError) {
+    showToast(`Historical Landsat archive lookup failed (${searchError}) — no simulated records are shown.`, true);
+  } else if (usedReal) {
     const total = scenes[0] && scenes[0].totalFound;
     const countMsg = (total && total > scenes.length)
       ? `Found ${total} real scenes across your date range — showing ${scenes.length} spread evenly across it`
@@ -1177,6 +1217,9 @@ function renderScenes(scenes) {
     const meta = [
       s.tile   ? ['Tile / Path', s.tile]     : null,
       s.orbit  ? ['Orbit dir.', s.orbit]     : null,
+      s.mission ? ['Mission', s.mission] : null,
+      s.archiveCollection ? ['Archive', s.archiveCollection] : null,
+      s.archiveProduct ? ['Product ID', s.archiveProduct] : null,
       s.size != null ? ['Est. size', s.size + ' MB'] : ['File size', 'shown after Download (real, per-band)'],
       ['Bands', s.bands.slice(0,4).join(', ') + (s.bands.length > 4 ? ' …' : '')],
       ['Source', s.stacItem ? 'Real scene (Earth Search STAC)' : SENSORS[s.sensor].sources[0]]
@@ -1380,16 +1423,31 @@ async function linksFromStacItem(item, sensor, requestedBands) {
   const keyMap = sensor === 'S2' ? S2_ASSET_KEYS : L8_ASSET_KEYS;
   const links = [];
   const missing = [];
-  requestedBands.forEach(b => {
-    const key = keyMap[b];
-    const asset = key && item.assets[key];
-    if (asset && asset.href) {
+  if (sensor === 'LHS') {
+    Object.entries(item.assets || {}).forEach(([key, asset]) => {
+      if (!asset || !asset.href) return;
       const file = asset.href.split('/').pop();
-      links.push({ label: b, url: asset.href, s3: asset.href, file, size: null, icon: sensor === 'S2' ? '🟩' : '🟦' });
-    } else {
-      missing.push(b);
-    }
-  });
+      links.push({
+        label: key,
+        url: asset.href,
+        s3: asset.href,
+        file,
+        size: null,
+        icon: key === 'thumbnail' ? '🖼️' : '🟦'
+      });
+    });
+  } else {
+    requestedBands.forEach(b => {
+      const key = keyMap[b];
+      const asset = key && item.assets[key];
+      if (asset && asset.href) {
+        const file = asset.href.split('/').pop();
+        links.push({ label: b, url: asset.href, s3: asset.href, file, size: null, icon: sensor === 'S2' ? '🟩' : '🟦' });
+      } else {
+        missing.push(b);
+      }
+    });
+  }
   // Fetch real sizes in parallel rather than one guessed number per band
   await Promise.all(links.map(async l => {
     l.size = (await fetchRealSize(l.url)) || 'size unknown — see "Open ↗"';
@@ -1408,15 +1466,19 @@ async function linksFromStacItem(item, sensor, requestedBands) {
 async function buildS3Links(scene) {
   const links = [];
 
-  if (scene.sensor === 'S2' || scene.sensor === 'L8') {
-    const collection = scene.sensor === 'S2' ? 'sentinel-2-l2a' : 'landsat-c2-l2';
+  if (scene.sensor === 'S2' || scene.sensor === 'L8' || scene.sensor === 'LHS') {
+    const collection = scene.sensor === 'S2'
+      ? 'sentinel-2-l2a'
+      : scene.sensor === 'L8'
+        ? 'landsat-c2-l2'
+        : 'landsat-c2-l1';
     let item = scene.stacItem || null;
     let cloudRelaxed = false;
     let maxCloud = document.getElementById('cloud-slider') ? document.getElementById('cloud-slider').value : null;
 
     if (!item) {
-      // Scene came from the mock fallback (catalog search failed earlier) —
-      // do the nearest-match lookup now instead.
+      // Historical archive results are always loaded from a real catalog item;
+      // do not construct a fallback item from a date or random metadata.
       const bbox = currentSearchBbox();
       const result = await findNearestStacItem(collection, bbox, scene.date, maxCloud);
       item = result.item;
